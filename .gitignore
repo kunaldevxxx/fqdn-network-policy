@@ -1,0 +1,5 @@
+bin/
+*.tar.gz
+.DS_Store
+*.log
+/manager

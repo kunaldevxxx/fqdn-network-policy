@@ -1,0 +1,20 @@
+apiVersion: netsec.yourorg.io/v1alpha1
+kind: FQDNNetworkPolicy
+metadata:
+  name: allow-stripe-and-github
+  namespace: payments
+spec:
+  podSelector:
+    podSelector:
+      matchLabels:
+        app: checkout-service
+  egress:
+    - match: api.stripe.com
+      ports:
+        - port: 443
+          protocol: TCP
+    - match: api.github.com
+      ports:
+        - port: 443
+          protocol: TCP
+  resolutionTTLOverride: 30
