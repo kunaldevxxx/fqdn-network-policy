@@ -1,0 +1,18 @@
+apiVersion: netsec.kunal.dev/v1alpha1
+kind: ClusterFQDNNetworkPolicy
+metadata:
+  name: allow-telemetry-cluster-wide
+spec:
+  mode: Enforce
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: production
+  podSelector:
+    podSelector:
+      matchLabels:
+        app: backend
+  egress:
+    - match: otel-collector.corp.example.com
+      ports:
+        - port: 4317
+          protocol: TCP

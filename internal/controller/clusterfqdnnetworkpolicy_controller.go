@@ -59,7 +59,7 @@ func (r *ClusterFQDNNetworkPolicyReconciler) Reconcile(ctx context.Context, req 
 		timer := time.Now()
 		res, err := r.Resolver.Resolve(ctx, rule.Match)
 		elapsed := time.Since(timer)
-		metrics.DNSLookupDuration.WithLabelValues(rule.Match).Observe(elapsed.Seconds())
+		metrics.DNSLookupDuration.WithLabelValues(rule.Match, "active").Observe(elapsed.Seconds())
 
 		if err != nil {
 			logger.Error(err, "resolution failed", "hostname", rule.Match)

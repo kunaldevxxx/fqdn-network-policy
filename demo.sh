@@ -37,8 +37,8 @@ until kubectl wait node --all --for=condition=Ready --timeout=30s 2>/dev/null; d
 done
 kubectl -n kube-system rollout status daemonset/calico-node --timeout=60s
 
-section "3. Install the FQDNNetworkPolicy CRD"
-kubectl apply -f config/crd/bases/netsec.kunal.dev_fqdnnetworkpolicies.yaml
+section "3. Install CRDs (FQDNNetworkPolicy + ClusterFQDNNetworkPolicy)"
+kubectl apply -f config/crd/bases/
 
 section "4. Build and load the controller image into kind"
 docker build -t "$IMAGE_TAG" .
@@ -62,14 +62,30 @@ kubectl -n "$NS" exec checkout-service -- curl -sS -o /dev/null -w "example.com 
 section "8. Apply the FQDNNetworkPolicy: allow only api.stripe.com"
 kubectl apply -f config/samples/netsec_v1alpha1_fqdnnetworkpolicy.yaml
 echo "waiting for the controller to resolve hosts and generate a NetworkPolicy..."
-sleep 5
+NP_FOUND=false
+for i in $(seq 1 30); do
+  NP=$(kubectl -n "$NS" get networkpolicy fqdnnp-allow-stripe-and-github 2>/dev/null || true)
+  if [ -n "$NP" ]; then
+    echo "  NetworkPolicy generated (attempt $i)"
+    NP_FOUND=true
+    break
+  fi
+  echo "  attempt $i/30 — not yet, retrying in 2s..."
+  sleep 2
+done
+if [ "$NP_FOUND" = false ]; then
+  echo "WARNING: NetworkPolicy not seen after 60s — controller logs:"
+  kubectl logs -n fqdn-network-policy-system \
+    -l app=fqdn-network-policy-controller --tail=30
+fi
 kubectl -n "$NS" get fqdnnetworkpolicy allow-stripe-and-github -o wide
-kubectl -n "$NS" get networkpolicy
+kubectl -n "$NS" get networkpolicy fqdnnp-allow-stripe-and-github -o yaml 2>/dev/null || true
 
 section "9. AFTER policy: allowed host works, everything else is blocked"
 set +e
 kubectl -n "$NS" exec checkout-service -- curl -sS --max-time 5 -o /dev/null -w "api.stripe.com -> HTTP %{http_code}\n" https://api.stripe.com
-kubectl -n "$NS" exec checkout-service -- curl -sS --max-time 5 -o /dev/null -w "example.com   -> %{errormsg}\n" https://example.com
+# HTTP 000 means curl timed out — Calico dropped the packets (blocked)
+kubectl -n "$NS" exec checkout-service -- curl -sS --max-time 5 -o /dev/null -w "example.com   -> HTTP %{http_code} (000 = blocked by NetworkPolicy)\n" https://example.com
 set -e
 
 section "Done. Tear down with: kind delete cluster --name $CLUSTER_NAME"
