@@ -1,3 +1,84 @@
+# v0.1.1 — Bug fixes: IPv6 CIDRs, RBAC, demo reliability
+
+This release fixes three bugs that prevented the controller from working
+correctly on a fresh cluster. The demo (`./demo.sh`) now runs end-to-end
+without intervention.
+
+## Bug fixes
+
+**IPv6 CIDR prefix length (`internal/netpol/helpers.go`)**
+
+The controller was generating `ipBlock.cidr` entries with a `/32` prefix for
+every resolved IP regardless of address family. Kubernetes rejects any CIDR
+where bits are set beyond the prefix length, so IPv6 addresses — including
+NAT64-mapped addresses in the `64:ff9b::/96` prefix returned by clusters that
+translate IPv4 to IPv6 — caused a validation error and the NetworkPolicy was
+never created. The controller retried on backoff, logging the same error
+repeatedly, and egress remained deny-all indefinitely.
+
+Fix: `hostCIDR()` now inspects the parsed IP and returns `/128` for IPv6
+addresses and `/32` for IPv4. A single host route in IPv6 requires a full
+128-bit mask; `/32` is an IPv4 concept.
+
+**Missing ClusterRoleBinding (`config/rbac/role.yaml`)**
+
+The ClusterRole granting the controller access to `FQDNNetworkPolicy` and
+`NetworkPolicy` resources existed, but there was no ClusterRoleBinding to
+attach it to the controller's ServiceAccount. On any fresh cluster the
+controller pod would start successfully, then immediately fail to watch its
+own CRD, logging `fqdnnetworkpolicies.netsec.kunal.dev is forbidden` in a
+backoff loop. No FQDNNetworkPolicy was ever reconciled.
+
+Fix: a `ClusterRoleBinding` binding
+`system:serviceaccount:fqdn-network-policy-system:fqdn-network-policy-controller`
+to the ClusterRole is now included in `config/rbac/role.yaml` and applied in
+step 5 of `demo.sh`.
+
+**Calico install timeout in `demo.sh`**
+
+The script waited for `kubectl rollout status daemonset/calico-node
+--timeout=180s`. This reliably timed out because Calico uses `hostNetwork`
+and runs before the node has a CNI — the node stays `NotReady` until the
+Calico CNI plugin writes its config, but `rollout status` requires all
+DaemonSet pods to be available, which can take longer than 180 seconds on
+slower machines or under Docker resource constraints.
+
+Fix: the script now polls `kubectl wait node --all --for=condition=Ready`
+in a 30-second burst loop. The node transitioning to `Ready` is the correct
+completion signal — it proves the CNI plugin is installed and functional.
+Once the node is Ready, a short 60-second `rollout status` confirms the
+DaemonSet has fully rolled out.
+
+## Documentation
+
+Rewrote `README.md`:
+
+- Architecture diagram showing the resolve-build-enforce flow.
+- Full spec and status field reference tables.
+- Inline sample CR with field-level annotations.
+- Generated NetworkPolicy naming convention and how to inspect it.
+- Known limitations as a scannable table instead of scattered prose.
+
+## Upgrade from v0.1.0
+
+Re-apply the RBAC manifest to pick up the new ClusterRoleBinding:
+
+```bash
+kubectl apply -f config/rbac/role.yaml
+```
+
+Then restart the controller so it picks up the new permissions:
+
+```bash
+kubectl rollout restart deployment/fqdn-network-policy-controller \
+  -n fqdn-network-policy-system
+```
+
+No CRD schema changes. No changes to `FQDNNetworkPolicy` spec or status
+fields. Existing FQDNNetworkPolicy resources do not need to be re-applied.
+
+---
+
 # v0.1.0 — Initial scaffold
 
 First cut of `fqdn-network-policy`: a controller that lets you write
