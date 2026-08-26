@@ -4,6 +4,7 @@ metadata:
   name: allow-stripe-and-github
   namespace: payments
 spec:
+  mode: Enforce  # set to Audit for dry-run logging without writing NetworkPolicy
   podSelector:
     podSelector:
       matchLabels:
@@ -17,4 +18,23 @@ spec:
       ports:
         - port: 443
           protocol: TCP
-  resolutionTTLOverride: 30
+  # coreDNSAddress: "10.96.0.10:53"  # uncomment to query CoreDNS directly
+---
+apiVersion: netsec.kunal.dev/v1alpha1
+kind: ClusterFQDNNetworkPolicy
+metadata:
+  name: allow-telemetry-cluster-wide
+spec:
+  mode: Enforce
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: production
+  podSelector:
+    podSelector:
+      matchLabels:
+        app: backend
+  egress:
+    - match: otel-collector.corp.example.com
+      ports:
+        - port: 4317
+          protocol: TCP

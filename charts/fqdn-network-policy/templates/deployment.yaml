@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fqdn-network-policy.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "fqdn-network-policy.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "fqdn-network-policy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "fqdn-network-policy.selectorLabels" . | nindent 8 }}
+      annotations:
+        kubectl.kubernetes.io/default-container: controller
+    spec:
+      serviceAccountName: {{ include "fqdn-network-policy.serviceAccountName" . }}
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: controller
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          args:
+            - --metrics-bind-address={{ .Values.metrics.bindAddress }}
+            - --health-probe-bind-address={{ .Values.healthProbe.bindAddress }}
+            - --webhook-bind-address={{ .Values.webhook.bindAddress }}
+            {{- if .Values.leaderElection.enabled }}
+            - --leader-elect=true
+            {{- end }}
+            {{- if .Values.coreDNS.address }}
+            - --coredns-address={{ .Values.coreDNS.address }}
+            {{- end }}
+            {{- if .Values.snoopResolver.enabled }}
+            - --enable-snoop-resolver=true
+            - --snoop-listen-address={{ .Values.snoopResolver.listenAddress }}
+            {{- if .Values.snoopResolver.upstreamAddress }}
+            - --snoop-upstream={{ .Values.snoopResolver.upstreamAddress }}
+            {{- end }}
+            {{- end }}
+            - --enable-multi-resolver={{ .Values.multiResolver.enabled }}
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+            - name: webhook
+              containerPort: 9443
+              protocol: TCP
+            {{- if .Values.snoopResolver.enabled }}
+            - name: dns-proxy
+              containerPort: 5353
+              protocol: UDP
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

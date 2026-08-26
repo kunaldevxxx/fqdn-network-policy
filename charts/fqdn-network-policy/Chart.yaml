@@ -1,0 +1,20 @@
+apiVersion: v2
+name: fqdn-network-policy
+description: >
+  FQDN-based egress control for standard Kubernetes CNIs (Calico, Flannel,
+  AWS VPC CNI, Azure CNI). Resolves hostnames to IPs and reconciles standard
+  NetworkPolicy objects so teams on non-Cilium clusters can enforce egress
+  allow-lists by domain name.
+type: application
+version: 0.2.0
+appVersion: "0.2.0"
+keywords:
+  - networking
+  - security
+  - network-policy
+  - egress
+  - fqdn
+home: https://github.com/kunaldevxxx/fqdn-network-policy
+maintainers:
+  - name: Kunal Khare
+    email: kunal.khare@improving.com
