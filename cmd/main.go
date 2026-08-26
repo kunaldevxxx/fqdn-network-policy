@@ -3,9 +3,9 @@ package main
 import (
 	"os"
 
-	netv1alpha1 "github.com/yourorg/fqdn-network-policy/api/v1alpha1"
-	"github.com/yourorg/fqdn-network-policy/internal/controller"
-	"github.com/yourorg/fqdn-network-policy/internal/dns"
+	netv1alpha1 "github.com/kunaldevxxx/fqdn-network-policy/api/v1alpha1"
+	"github.com/kunaldevxxx/fqdn-network-policy/internal/controller"
+	"github.com/kunaldevxxx/fqdn-network-policy/internal/dns"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/runtime"

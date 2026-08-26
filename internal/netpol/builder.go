@@ -8,7 +8,7 @@ package netpol
 import (
 	"fmt"
 
-	netv1alpha1 "github.com/yourorg/fqdn-network-policy/api/v1alpha1"
+	netv1alpha1 "github.com/kunaldevxxx/fqdn-network-policy/api/v1alpha1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -48,8 +48,8 @@ func Build(fp *netv1alpha1.FQDNNetworkPolicy) (*networkingv1.NetworkPolicy, erro
 			Name:      OwnerName(fp.Name),
 			Namespace: fp.Namespace,
 			Labels: map[string]string{
-				"netsec.yourorg.io/managed-by":       "fqdn-network-policy",
-				"netsec.yourorg.io/fqdnnetworkpolicy": fp.Name,
+				"netsec.kunal.dev/managed-by":       "fqdn-network-policy",
+				"netsec.kunal.dev/fqdnnetworkpolicy": fp.Name,
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(fp, netv1alpha1.GroupVersion.WithKind("FQDNNetworkPolicy")),
@@ -82,8 +82,8 @@ func denyAllEgress(fp *netv1alpha1.FQDNNetworkPolicy) *networkingv1.NetworkPolic
 			Name:      OwnerName(fp.Name),
 			Namespace: fp.Namespace,
 			Labels: map[string]string{
-				"netsec.yourorg.io/managed-by":       "fqdn-network-policy",
-				"netsec.yourorg.io/fqdnnetworkpolicy": fp.Name,
+				"netsec.kunal.dev/managed-by":       "fqdn-network-policy",
+				"netsec.kunal.dev/fqdnnetworkpolicy": fp.Name,
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(fp, netv1alpha1.GroupVersion.WithKind("FQDNNetworkPolicy")),

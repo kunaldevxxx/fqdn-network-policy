@@ -1,4 +1,4 @@
-apiVersion: netsec.yourorg.io/v1alpha1
+apiVersion: netsec.kunal.dev/v1alpha1
 kind: FQDNNetworkPolicy
 metadata:
   name: allow-stripe-and-github

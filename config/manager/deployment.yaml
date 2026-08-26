@@ -3,6 +3,12 @@ kind: Namespace
 metadata:
   name: fqdn-network-policy-system
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fqdn-network-policy-controller
+  namespace: fqdn-network-policy-system
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:

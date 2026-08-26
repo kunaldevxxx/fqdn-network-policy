@@ -8,7 +8,7 @@
 SHELL := /usr/bin/env bash
 
 # ---- Tool versions (pinned; bump deliberately, not accidentally) ----------
-CONTROLLER_GEN_VERSION ?= v0.14.0
+CONTROLLER_GEN_VERSION ?= v0.16.0
 
 # ---- Paths ------------------------------------------------------------
 LOCALBIN ?= $(shell pwd)/bin
@@ -23,9 +23,9 @@ all: generate manifests build
 ## ---- Codegen -----------------------------------------------------------
 
 .PHONY: controller-gen
-controller-gen: $(LOCALBIN) ## Download controller-gen locally if not present, pinned to CONTROLLER_GEN_VERSION.
+controller-gen: $(LOCALBIN) ## Build controller-gen from main module deps (version pinned in go.mod, not via go install @version).
 	@test -s $(CONTROLLER_GEN) && $(CONTROLLER_GEN) --version | grep -q $(CONTROLLER_GEN_VERSION) || \
-		GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
+		GOBIN=$(LOCALBIN) go build -o $(CONTROLLER_GEN) sigs.k8s.io/controller-tools/cmd/controller-gen
 
 .PHONY: generate
 generate: controller-gen ## Regenerate zz_generated.deepcopy.go from +kubebuilder markers.

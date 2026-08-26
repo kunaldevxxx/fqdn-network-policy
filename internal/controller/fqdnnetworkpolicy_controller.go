@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	netv1alpha1 "github.com/yourorg/fqdn-network-policy/api/v1alpha1"
-	"github.com/yourorg/fqdn-network-policy/internal/dns"
-	"github.com/yourorg/fqdn-network-policy/internal/netpol"
+	netv1alpha1 "github.com/kunaldevxxx/fqdn-network-policy/api/v1alpha1"
+	"github.com/kunaldevxxx/fqdn-network-policy/internal/dns"
+	"github.com/kunaldevxxx/fqdn-network-policy/internal/netpol"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -29,8 +29,8 @@ type FQDNNetworkPolicyReconciler struct {
 	Resolver dns.Resolver // swap for dns.NewSnoopResolver() once implemented
 }
 
-// +kubebuilder:rbac:groups=netsec.yourorg.io,resources=fqdnnetworkpolicies,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=netsec.yourorg.io,resources=fqdnnetworkpolicies/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=netsec.kunal.dev,resources=fqdnnetworkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=netsec.kunal.dev,resources=fqdnnetworkpolicies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 func (r *FQDNNetworkPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

@@ -30,7 +30,7 @@ echo "waiting for Calico to be ready..."
 kubectl -n kube-system rollout status daemonset/calico-node --timeout=180s
 
 section "3. Install the FQDNNetworkPolicy CRD"
-kubectl apply -f config/crd/bases/netsec.yourorg.io_fqdnnetworkpolicies.yaml
+kubectl apply -f config/crd/bases/netsec.kunal.dev_fqdnnetworkpolicies.yaml
 
 section "4. Build and load the controller image into kind"
 docker build -t "$IMAGE_TAG" .

@@ -11,7 +11,7 @@ be cloned, run against the included demo, and extended.
 ## What's in this release
 
 **CRD**
-- `FQDNNetworkPolicy` (`netsec.yourorg.io/v1alpha1`): define egress rules
+- `FQDNNetworkPolicy` (`netsec.kunal.dev/v1alpha1`): define egress rules
   by hostname per pod selector, with per-rule port/protocol restrictions
   and an optional TTL override for re-resolution.
 
