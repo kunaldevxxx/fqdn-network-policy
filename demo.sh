@@ -27,7 +27,15 @@ EOF
 section "2. Install Calico (kind's default CNI does NOT enforce NetworkPolicy)"
 kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml
 echo "waiting for Calico to be ready..."
-kubectl -n kube-system rollout status daemonset/calico-node --timeout=180s
+# Calico uses hostNetwork so its pod starts before the node has a CNI.
+# Once calico-node writes the CNI config the node flips to Ready — that is
+# the reliable completion signal. Poll with short bursts to avoid a single
+# long timeout that can fire before bootstrap finishes.
+until kubectl wait node --all --for=condition=Ready --timeout=30s 2>/dev/null; do
+  echo "  node not yet Ready, retrying..."
+  sleep 10
+done
+kubectl -n kube-system rollout status daemonset/calico-node --timeout=60s
 
 section "3. Install the FQDNNetworkPolicy CRD"
 kubectl apply -f config/crd/bases/netsec.kunal.dev_fqdnnetworkpolicies.yaml
