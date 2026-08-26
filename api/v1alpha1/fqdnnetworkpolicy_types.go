@@ -4,6 +4,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// PolicyMode controls whether the controller enforces the generated
+// NetworkPolicy or only logs what would have been allowed/blocked.
+// +kubebuilder:validation:Enum=Enforce;Audit
+type PolicyMode string
+
+const (
+	PolicyModeEnforce PolicyMode = "Enforce"
+	PolicyModeAudit   PolicyMode = "Audit"
+)
+
 // PodSelectorSpec mirrors the subset of NetworkPolicy's pod/namespace targeting
 // that we need. Kept separate from networkingv1 types so this CRD has no hard
 // dependency on how the generated NetworkPolicy is shaped downstream.
@@ -16,12 +26,18 @@ type PodSelectorSpec struct {
 
 // FQDNRule describes one allowed external destination.
 type FQDNRule struct {
-	// Match is a hostname or a wildcard pattern, e.g. "api.stripe.com" or "*.googleapis.com".
+	// Match is a fully qualified domain name, e.g. "api.stripe.com".
+	// Wildcard patterns (*.foo.com) are accepted only when the snoop resolver
+	// is active; a validation webhook rejects wildcards otherwise.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:XValidation:rule="self.matches('^(\\\\*\\\\.)?([a-zA-Z0-9]([a-zA-Z0-9\\\\-]{0,61}[a-zA-Z0-9])?\\\\.)+[a-zA-Z]{2,}$')",message="Must be a valid FQDN or wildcard FQDN (*.example.com)."
 	Match string `json:"match"`
 
 	// Ports restricts the rule to specific destination ports/protocols.
-	// Empty means all ports.
+	// Empty means all ports. Specifying explicit ports is strongly recommended
+	// to avoid opening attack vectors on unintended port numbers.
 	// +optional
 	Ports []PolicyPort `json:"ports,omitempty"`
 }
@@ -31,9 +47,12 @@ type PolicyPort struct {
 	// Protocol is TCP, UDP, or SCTP. Defaults to TCP.
 	// +optional
 	// +kubebuilder:default=TCP
+	// +kubebuilder:validation:Enum=TCP;UDP;SCTP
 	Protocol string `json:"protocol,omitempty"`
 
-	// Port is the destination port number.
+	// Port is the destination port number (1-65535).
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
 	Port int32 `json:"port"`
 }
 
@@ -43,20 +62,42 @@ type FQDNNetworkPolicySpec struct {
 	PodSelector PodSelectorSpec `json:"podSelector"`
 
 	// Egress is the list of allowed external FQDNs.
+	// +kubebuilder:validation:MinItems=1
 	Egress []FQDNRule `json:"egress"`
+
+	// Mode controls enforcement. "Enforce" (default) creates and maintains
+	// the generated NetworkPolicy. "Audit" logs what would be allowed/blocked
+	// without writing any NetworkPolicy -- safe for dry-runs.
+	// +optional
+	// +kubebuilder:default=Enforce
+	Mode PolicyMode `json:"mode,omitempty"`
 
 	// ResolutionTTLOverride forces a re-resolution interval in seconds,
 	// overriding observed DNS TTLs. Useful for flaky upstream TTLs.
 	// +optional
+	// +kubebuilder:validation:Minimum=5
+	// +kubebuilder:validation:Maximum=300
 	ResolutionTTLOverride *int32 `json:"resolutionTTLOverride,omitempty"`
+
+	// CoreDNSAddress is the host:port of the cluster DNS server to query
+	// directly (e.g. "10.96.0.10:53"). When set, the controller resolves
+	// FQDNs against cluster CoreDNS rather than the node's system resolver,
+	// reducing geo-DNS divergence between the controller and workload pods.
+	// +optional
+	CoreDNSAddress string `json:"coreDNSAddress,omitempty"`
 }
 
 // ResolvedHost records the last known IPs for one matched hostname.
 type ResolvedHost struct {
-	Hostname   string      `json:"hostname"`
-	IPs        []string    `json:"ips"`
-	LastSeen   metav1.Time `json:"lastSeen"`
-	Source     string      `json:"source"` // "dns-snoop" or "active-lookup"
+	Hostname string      `json:"hostname"`
+	IPs      []string    `json:"ips"`
+	LastSeen metav1.Time `json:"lastSeen"`
+	// Source is "dns-snoop" when the eBPF resolver observed the answer, or
+	// "active-lookup" when the controller queried DNS directly.
+	Source string `json:"source"`
+	// TTLSeconds is the DNS TTL of the last response, in seconds.
+	// +optional
+	TTLSeconds int32 `json:"ttlSeconds,omitempty"`
 }
 
 // FQDNNetworkPolicyStatus defines the observed state.
@@ -67,11 +108,12 @@ type FQDNNetworkPolicyStatus struct {
 
 	// GeneratedNetworkPolicy is the name of the plain NetworkPolicy object
 	// this controller manages on behalf of this resource.
+	// Empty in Audit mode (no NetworkPolicy is written).
 	// +optional
 	GeneratedNetworkPolicy string `json:"generatedNetworkPolicy,omitempty"`
 
-	// Conditions follow the standard metav1.Condition pattern
-	// (Ready, ResolutionDegraded, etc).
+	// Conditions follow the standard metav1.Condition pattern.
+	// Condition types: Ready, Resolving, Degraded.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
@@ -83,7 +125,9 @@ type FQDNNetworkPolicyStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=fqdnnp,scope=Namespaced
+// +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.spec.mode`
 // +kubebuilder:printcolumn:name="Generated",type=string,JSONPath=`.status.generatedNetworkPolicy`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // FQDNNetworkPolicy lets users allow-list egress by hostname on any CNI,

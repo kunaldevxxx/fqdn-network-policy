@@ -1,0 +1,105 @@
+# Default values for fqdn-network-policy controller.
+
+replicaCount: 2  # ≥2 enables leader election for HA
+
+image:
+  repository: ghcr.io/kunaldevxxx/fqdn-network-policy
+  tag: "0.2.0"
+  pullPolicy: IfNotPresent
+
+# ── Resolver strategy ──────────────────────────────────────────────────────
+# Priority: snoopResolver (best) > multiResolver (good) > activeResolver (baseline)
+
+snoopResolver:
+  # Enable the DNS forwarding proxy. When true, configure CoreDNS to forward
+  # all queries to <snoopListenAddress> so the controller sees actual pod responses.
+  enabled: false
+  listenAddress: "0.0.0.0:5353"
+  # CoreDNS configmap patch (generated when snoopResolver.enabled=true):
+  #   forward . <podIP>:5353
+  upstreamAddress: ""  # defaults to coreDNS.address or system resolver
+
+multiResolver:
+  # Query Cloudflare, Google, Quad9, and OpenDNS concurrently and union results.
+  # Recommended for clusters serving CDN-backed external APIs (Stripe, GitHub, etc).
+  enabled: true
+
+coreDNS:
+  # Optional: direct the controller to query CoreDNS instead of the node resolver.
+  # Reduces divergence for internal split-horizon DNS. Obtain via:
+  #   kubectl get svc kube-dns -n kube-system -o jsonpath='{.spec.clusterIP}'
+  address: ""  # e.g. "10.96.0.10:53"
+
+# ── Leader election ────────────────────────────────────────────────────────
+leaderElection:
+  enabled: true  # should match replicaCount > 1
+
+# ── Observability ─────────────────────────────────────────────────────────
+metrics:
+  bindAddress: ":8080"
+  serviceMonitor:
+    # Set to true if you have prometheus-operator installed.
+    enabled: false
+    interval: 30s
+    namespace: ""  # defaults to release namespace
+
+healthProbe:
+  bindAddress: ":8081"
+
+# ── Webhook ───────────────────────────────────────────────────────────────
+webhook:
+  enabled: true
+  bindAddress: ":9443"
+  # TLS certificate for the webhook server (required for production).
+  # Use cert-manager with the annotation below, or provide your own.
+  certManager:
+    enabled: false
+    issuerRef:
+      name: selfsigned-issuer
+      kind: ClusterIssuer
+
+# ── RBAC ──────────────────────────────────────────────────────────────────
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+    # For IRSA on EKS:
+    # eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT:role/fqdn-controller
+
+# ── Resources ─────────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# ── Pod security ──────────────────────────────────────────────────────────
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+# ── Scheduling ────────────────────────────────────────────────────────────
+nodeSelector: {}
+tolerations: []
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: fqdn-network-policy
+          topologyKey: kubernetes.io/hostname

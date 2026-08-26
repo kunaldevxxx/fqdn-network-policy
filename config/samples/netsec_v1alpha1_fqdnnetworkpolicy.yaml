@@ -4,6 +4,7 @@ metadata:
   name: allow-stripe-and-github
   namespace: payments
 spec:
+  mode: Enforce  # set to Audit for dry-run logging without writing NetworkPolicy
   podSelector:
     podSelector:
       matchLabels:
@@ -17,4 +18,4 @@ spec:
       ports:
         - port: 443
           protocol: TCP
-  resolutionTTLOverride: 30
+  # coreDNSAddress: "10.96.0.10:53"  # uncomment to query CoreDNS directly

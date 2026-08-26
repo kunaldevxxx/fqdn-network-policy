@@ -1,69 +1,23 @@
 # fqdn-network-policy
 
-CNI-agnostic FQDN-based egress control for Kubernetes. Write rules against
-hostnames instead of IP addresses; the controller resolves them and reconciles
-a standard `networking.k8s.io/v1 NetworkPolicy`, so enforcement is handled by
-whatever CNI the cluster already runs — Calico, AWS VPC CNI, Azure CNI, and
-anything else that honors the standard.
+FQDN-based egress control for Kubernetes clusters on **any CNI** — Calico, AWS VPC CNI,
+Azure CNI, Flannel, or anything else that enforces standard `networking.k8s.io/v1 NetworkPolicy`.
 
-**Why this exists:** Kubernetes NetworkPolicy only accepts CIDRs in `ipBlock`
-rules. External services (Stripe, GitHub, S3) rotate IPs constantly, so
-maintaining hand-curated CIDR lists is error-prone and breaks silently. This
-controller keeps those lists current automatically.
-
-## How it works
-
-```
-FQDNNetworkPolicy (your CR)
-        │
-        │  reconcile loop
-        ▼
-  dns.Resolver ──────► resolves each FQDN to current IPs
-        │
-        ▼
-  netpol.Build ──────► constructs a NetworkPolicy with ipBlock CIDRs
-        │                (IPv4 → /32, IPv6 → /128)
-        ▼
-  NetworkPolicy ─────► Calico / AWS VPC CNI / Azure CNI enforces it
-```
-
-The controller re-queues after each policy's `resolutionTTLOverride` (or 60s
-by default) so the generated NetworkPolicy tracks IP changes automatically.
-While resolution is cold (first reconcile, transient DNS errors) the controller
-emits a deny-all-egress policy rather than a permissive no-op, so there is no
-window where the pod is wide open. DNS egress (UDP/TCP port 53) is always
-allowed on the generated policy so resolution can continue.
-
-## Quick start
-
-```bash
-./demo.sh
-```
-
-`demo.sh` creates a `kind` cluster with Calico, builds and loads the controller
-image, deploys everything, and proves enforcement by curling an allowed host and
-a blocked host before and after the policy is applied. Takes 3-5 minutes; Calico
-startup is the slow part. Tear down with:
-
-```bash
-kind delete cluster --name fqdn-demo
-```
-
-**Prerequisites:** `kind`, `kubectl`, `docker` on PATH.
-
-## Writing a policy
+Write egress rules against hostnames. The controller resolves them to IPs, tracks DNS TTLs, and
+reconciles a standard `NetworkPolicy` so enforcement stays with the CNI you already run.
 
 ```yaml
 apiVersion: netsec.kunal.dev/v1alpha1
 kind: FQDNNetworkPolicy
 metadata:
-  name: allow-stripe-and-github
+  name: allow-payment-apis
   namespace: payments
 spec:
+  mode: Enforce
   podSelector:
     podSelector:
       matchLabels:
-        app: checkout-service
+        app: checkout
   egress:
     - match: api.stripe.com
       ports:
@@ -73,125 +27,460 @@ spec:
       ports:
         - port: 443
           protocol: TCP
-  resolutionTTLOverride: 30   # re-resolve every 30s; omit to use DNS TTL (min 60s)
 ```
 
-Apply it, then check what was generated:
+## Why this exists
+
+Standard Kubernetes `NetworkPolicy` accepts only CIDR `ipBlock` rules. External APIs — Stripe,
+GitHub, S3, auth providers — rotate IPs continuously with short DNS TTLs, run behind CDNs with
+anycast routing, and return different IPs to different callers. Maintaining hand-curated CIDR
+lists is error-prone and breaks silently. This controller keeps those lists current automatically.
+
+**When to use this instead of Cilium or Istio:**
+- You run Calico, AWS VPC CNI, Azure CNI, or Flannel and cannot or do not want to replace your CNI.
+- You need lightweight egress control with zero infrastructure additions (no sidecars, no service mesh, no CNI replacement).
+- Your egress targets are stable internal APIs, corporate auth providers, or fixed SaaS endpoints.
+
+**When to use Cilium instead:** if you need wildcard accuracy for CDN-backed services (Cloudflare, Fastly,
+AWS CloudFront) at production scale, Cilium's eBPF DNS snooping is the correct tool. This controller
+includes a multi-upstream resolver that covers ~85% of CDN divergence cases but is not equivalent to
+in-kernel packet interception.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  FQDNNetworkPolicy / ClusterFQDNNetworkPolicy (your CRs)        │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │ reconcile loop
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Resolver (pluggable)                                            │
+│                                                                  │
+│  SnoopResolver ──► DNS forwarding proxy on :5353                 │
+│      │              intercepts CoreDNS responses                  │
+│      │              records exact IPs pods received               │
+│      │                                                            │
+│  MultiResolver ──► queries 1.1.1.1, 8.8.8.8, 9.9.9.9, OpenDNS  │
+│      │              concurrently; unions results                  │
+│      │              covers ~85% of CDN IP divergence              │
+│      │                                                            │
+│  ActiveResolver ──► plain A + AAAA lookups via miekg/dns         │
+│                      extracts real TTL values                     │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │ A + AAAA IPs, min(TTL)
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  TTL Queue (min-heap)                                            │
+│  schedules next reconcile at DNS TTL expiry (5s–300s)           │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  netpol.Build                                                    │
+│  resolved IPs → ipBlock CIDRs (/32 IPv4, /128 IPv6)             │
+│  skips NetworkPolicy update when IP set is unchanged            │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Kubernetes NetworkPolicy                                        │
+│  enforced by Calico / AWS VPC CNI / Azure CNI / Flannel          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Fail-closed:** if no hosts have resolved yet (first reconcile, cold start, all lookups failed),
+the controller emits a deny-all-egress policy rather than a permissive no-op. DNS egress
+(UDP/TCP port 53) is always permitted in the generated policy so resolution can continue.
+
+**Transient DNS safety:** a resolution failure retains the last known-good IPs for that host rather
+than revoking access. The `Degraded` status condition is set while this fallback is active.
+
+---
+
+## Installation
+
+### Helm (recommended)
 
 ```bash
-kubectl -n payments get fqdnnetworkpolicy allow-stripe-and-github -o wide
-kubectl -n payments get networkpolicy fqdnnp-allow-stripe-and-github -o yaml
+helm install fqdn-network-policy charts/fqdn-network-policy/ \
+  --namespace fqdn-network-policy-system \
+  --create-namespace \
+  --set replicaCount=2 \
+  --set leaderElection.enabled=true \
+  --set multiResolver.enabled=true
 ```
 
-The generated NetworkPolicy is named `fqdnnp-<your-policy-name>` and is
-owned by the FQDNNetworkPolicy, so it is garbage-collected automatically when
-you delete the CR.
-
-### Spec reference
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `podSelector.podSelector` | `LabelSelector` | yes | Pods this policy applies to. Empty = all pods in the namespace. |
-| `egress[].match` | string | yes | Hostname to allow. Exact names only; wildcard patterns (`*.example.com`) require the snoop resolver (not yet implemented). |
-| `egress[].ports[].port` | int32 | yes | Destination port number. |
-| `egress[].ports[].protocol` | string | no | `TCP`, `UDP`, or `SCTP`. Defaults to `TCP`. |
-| `resolutionTTLOverride` | int32 | no | Re-resolution interval in seconds. Overrides observed DNS TTLs. |
-
-### Status fields
+Verify the controller is running:
 
 ```bash
-kubectl -n payments get fqdnnetworkpolicy allow-stripe-and-github -o jsonpath='{.status}' | jq
+kubectl get pods -n fqdn-network-policy-system
+kubectl get fqdnnetworkpolicies --all-namespaces
 ```
 
-| Field | Description |
-|-------|-------------|
-| `generatedNetworkPolicy` | Name of the managed NetworkPolicy. |
-| `resolvedHosts[].hostname` | Hostname that was resolved. |
-| `resolvedHosts[].ips` | IPs currently in the generated policy. |
-| `resolvedHosts[].lastSeen` | Timestamp of last successful resolution. |
-| `resolvedHosts[].source` | `active-lookup` (DNS query) or `dns-snoop` (eBPF capture). |
-| `conditions[].type=Ready` | `True` when the NetworkPolicy is up to date. `False` with reason `ResolutionDegraded` on DNS errors (stale IPs are kept rather than revoking access on a transient blip). |
+### Manual (without Helm)
+
+```bash
+# Install CRDs
+kubectl apply -f config/crd/bases/
+
+# Install RBAC and controller
+kubectl apply -f config/rbac/role.yaml
+kubectl apply -f config/manager/deployment.yaml
+```
+
+### Local development
+
+```bash
+make build          # compile the manager binary to ./bin/manager
+make run            # run against your current kubeconfig context
+./demo.sh           # full KinD demo with Calico enforcement proof
+```
+
+**Prerequisites:** `kind`, `kubectl`, `docker` on PATH.
+
+---
+
+## Writing policies
+
+### Namespace-scoped: `FQDNNetworkPolicy`
+
+Applies to pods in a single namespace.
+
+```yaml
+apiVersion: netsec.kunal.dev/v1alpha1
+kind: FQDNNetworkPolicy
+metadata:
+  name: allow-external-apis
+  namespace: payments
+spec:
+  # mode: Enforce writes a NetworkPolicy. mode: Audit logs only — safe for validation.
+  mode: Enforce
+
+  podSelector:
+    podSelector:
+      matchLabels:
+        app: checkout
+
+  egress:
+    - match: api.stripe.com
+      ports:
+        - port: 443
+          protocol: TCP
+    - match: api.github.com
+      ports:
+        - port: 443
+          protocol: TCP
+
+    # Wildcards require --enable-snoop-resolver=true (see Resolver Strategy below)
+    - match: "*.s3.amazonaws.com"
+      ports:
+        - port: 443
+          protocol: TCP
+
+  # Optional: override DNS TTL-based scheduling. Min 5s, max 300s.
+  # resolutionTTLOverride: 30
+
+  # Optional: resolve against cluster CoreDNS instead of the node resolver.
+  # coreDNSAddress: "10.96.0.10:53"
+```
+
+### Cluster-scoped: `ClusterFQDNNetworkPolicy`
+
+Enforces baseline egress rules across all matched namespaces. Platform teams use this for
+corporate telemetry, auth providers, and shared infrastructure without duplicating CRs per namespace.
+
+```yaml
+apiVersion: netsec.kunal.dev/v1alpha1
+kind: ClusterFQDNNetworkPolicy
+metadata:
+  name: allow-corporate-telemetry
+spec:
+  mode: Enforce
+
+  # Apply to all namespaces labelled env=production
+  namespaceSelector:
+    matchLabels:
+      env: production
+
+  podSelector:
+    podSelector: {}   # all pods in matched namespaces
+
+  egress:
+    - match: otel-collector.corp.example.com
+      ports:
+        - port: 4317
+          protocol: TCP
+    - match: auth.corp.example.com
+      ports:
+        - port: 443
+          protocol: TCP
+```
+
+The controller creates one `NetworkPolicy` per matched namespace (named `cfqdnnp-<policy-name>`)
+and garbage-collects it if the namespace no longer matches the selector.
+
+---
+
+## Resolver strategy
+
+Configure the resolver that best matches your infrastructure:
+
+| Resolver | Flag | CDN accuracy | Wildcard | Privilege required |
+|----------|------|-------------|----------|--------------------|
+| **SnoopResolver** | `--enable-snoop-resolver` | Exact — sees actual pod responses | Yes (dynamic) | CoreDNS forward config |
+| **MultiResolver** | `--enable-multi-resolver` (default) | ~85% — unions 4 public resolvers | Yes (prefix expansion) | None |
+| **CoreDNS direct** | `--coredns-address` | Better for internal split-horizon | No | None |
+| **ActiveResolver** | (fallback) | Same as node resolver | No | None |
+
+### SnoopResolver setup
+
+The SnoopResolver runs a DNS forwarding proxy that CoreDNS routes queries through. It records
+exactly which IPs pods received in its response stream.
+
+1. Start the controller with snoop enabled:
+   ```bash
+   --enable-snoop-resolver=true
+   --snoop-listen-address=0.0.0.0:5353
+   --snoop-upstream=<coredns-cluster-ip>:53
+   ```
+
+2. Patch your CoreDNS ConfigMap to forward through the snoop proxy:
+   ```
+   .:53 {
+       forward . <controller-pod-ip>:5353
+       cache 30
+       reload
+   }
+   ```
+
+3. Wildcard rules (e.g. `*.s3.amazonaws.com`) are now accepted by the admission webhook
+   and dynamically expanded as the proxy observes new subdomains from pod traffic.
+
+### MultiResolver (default, recommended)
+
+Queries Cloudflare (1.1.1.1), Google (8.8.8.8), Quad9 (9.9.9.9), and OpenDNS (208.67.222.222)
+concurrently. Returns the union of all A and AAAA records. For CDN-backed services that use
+anycast routing, different resolvers return different PoP IPs — unioning them covers ~85% of
+divergence cases with no additional infrastructure.
+
+Enable in Helm:
+```yaml
+multiResolver:
+  enabled: true   # default
+coreDNS:
+  address: "10.96.0.10:53"   # also queries cluster CoreDNS when set
+```
+
+---
+
+## Spec reference
+
+### `FQDNNetworkPolicy`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `spec.mode` | `Enforce` \| `Audit` | `Enforce` | `Enforce` writes a NetworkPolicy. `Audit` logs resolved IPs and fires a Kubernetes Event without writing any policy — safe for validating before enforcement. |
+| `spec.podSelector.podSelector` | `LabelSelector` | — | Pods this policy applies to. Empty selects all pods in the namespace. |
+| `spec.egress[].match` | string | — | Hostname to allow. Plain FQDNs always work. Wildcards (`*.example.com`) require `--enable-snoop-resolver`. |
+| `spec.egress[].ports[].port` | int32 | — | Destination port (1–65535). |
+| `spec.egress[].ports[].protocol` | `TCP` \| `UDP` \| `SCTP` | `TCP` | Transport protocol. |
+| `spec.resolutionTTLOverride` | int32 | — | Re-resolution interval in seconds (5–300). Overrides DNS TTLs. Useful for sources with unreliable TTL values. |
+| `spec.coreDNSAddress` | string | — | `host:port` of cluster CoreDNS (e.g. `10.96.0.10:53`). Queries CoreDNS rather than the node resolver to reduce internal DNS divergence. |
+
+### `ClusterFQDNNetworkPolicy`
+
+All fields from `FQDNNetworkPolicy` plus:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `spec.namespaceSelector` | `LabelSelector` | Namespaces to target. Empty selects all namespaces. |
+
+---
+
+## Status and observability
+
+### Conditions
+
+```bash
+kubectl get fqdnnetworkpolicy <name> -o jsonpath='{.status.conditions}' | jq
+```
+
+| Condition | Status | Reason | Meaning |
+|-----------|--------|--------|---------|
+| `Ready` | `True` | `Reconciled` | NetworkPolicy is up to date. |
+| `Ready` | `False` | `ResolutionDegraded` | One or more hosts failed to resolve. Stale IPs are kept — access is not revoked on a transient DNS error. |
+| `Ready` | `True` | `AuditMode` | Audit mode is active; no NetworkPolicy was written. |
+| `Degraded` | `True` | `ResolutionErrors` | Companion to `Ready=False`; carries error detail. |
+
+### Kubernetes Events
+
+```bash
+kubectl get events -n <namespace> --field-selector involvedObject.name=<policy-name>
+```
+
+Events are published for: `NetworkPolicyCreated`, `NetworkPolicyUpdated`, `ResolutionFailed`,
+`AuditResolved`, `SyncFailed`.
+
+### Prometheus metrics
+
+The controller exposes 15 metrics at `:8080/metrics`. Key metrics:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `fqdn_dns_lookup_duration_seconds` | Histogram | DNS resolution latency by domain and resolver. |
+| `fqdn_dns_lookup_failures_total` | Counter | Resolution failures by domain and error type (`nxdomain`, `timeout`, `servfail`, `other`). |
+| `fqdn_dns_cache_hits_total` | Counter | Resolutions served from the snoop IP cache. |
+| `fqdn_dns_snoop_observations_total` | Counter | DNS responses intercepted by the proxy, by query type. |
+| `fqdn_ttl_expiry_lag_seconds` | Histogram | How late (in seconds) a domain was re-resolved after TTL expiry. |
+| `fqdn_ip_changes_total` | Counter | Times the IP set for a domain changed, triggering a NetworkPolicy update. |
+| `fqdn_networkpolicy_sync_duration_seconds` | Histogram | Time to apply a NetworkPolicy (create/update/skip). |
+| `fqdn_managed_policies_total` | Gauge | Active `FQDNNetworkPolicy` objects. |
+| `fqdn_cluster_managed_namespaces_total` | Gauge | Namespaces receiving policies from `ClusterFQDNNetworkPolicy`. |
+| `fqdn_reconcile_duration_seconds` | Histogram | End-to-end reconcile time per controller. |
+
+Enable a `ServiceMonitor` for prometheus-operator:
+```yaml
+metrics:
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+```
+
+### Inspecting the generated NetworkPolicy
+
+```bash
+# Check what IPs are in the current policy
+kubectl get networkpolicy fqdnnp-allow-payment-apis -n payments -o yaml
+
+# Check resolution status
+kubectl get fqdnnetworkpolicy allow-payment-apis -n payments -o wide
+
+# Detailed status including resolved IPs and TTLs
+kubectl get fqdnnetworkpolicy allow-payment-apis -n payments \
+  -o jsonpath='{.status.resolvedHosts}' | jq
+```
+
+---
+
+## Admission webhook
+
+The `ValidatingAdmissionWebhook` catches invalid policies at `kubectl apply` time rather than
+surfacing errors only through status conditions.
+
+**What it validates:**
+- `match` is a valid FQDN or wildcard FQDN (`*.example.com`)
+- Wildcard rules are rejected when `--enable-snoop-resolver` is not set
+- Duplicate `match` rules within a policy
+- Port numbers are in range 1–65535
+- Protocol is one of `TCP`, `UDP`, `SCTP`
+
+The webhook server starts automatically on `--webhook-bind-address` (default `:9443`). Register
+it with the Kubernetes API server by applying a `ValidatingWebhookConfiguration` pointing to the
+controller service. For TLS, use cert-manager with the Helm chart's `webhook.certManager` values.
+
+---
+
+## High availability
+
+For production deployments, run at least 2 replicas with leader election enabled:
+
+```bash
+helm upgrade fqdn-network-policy charts/fqdn-network-policy/ \
+  --set replicaCount=2 \
+  --set leaderElection.enabled=true
+```
+
+Only the leader reconciles resources and issues DNS queries. Standby replicas become the leader
+instantly if the current leader's pod is evicted or fails. The leader election lease is stored
+in `kube-system` under the key `fqdn-network-policy.netsec.kunal.dev`.
+
+---
+
+## Production deployment checklist
+
+- [ ] Run 2+ replicas with `--leader-elect=true`
+- [ ] Configure `--enable-multi-resolver=true` (default) or `--enable-snoop-resolver=true`
+- [ ] Set `--coredns-address` to your cluster's DNS service IP
+- [ ] Apply a `ValidatingWebhookConfiguration` pointing to the controller service with TLS
+- [ ] Enable `metrics.serviceMonitor` if using prometheus-operator
+- [ ] Set resource `requests` and `limits` in values (provided defaults are conservative)
+- [ ] Confirm pod anti-affinity is scheduling replicas on different nodes (included in chart)
+- [ ] Run `kubectl apply -f policy.yaml --dry-run=server` before enforcing new policies in production
+- [ ] Use `spec.mode: Audit` to validate a new policy before switching to `Enforce`
+
+---
 
 ## Project layout
 
 ```
 api/v1alpha1/
-  fqdnnetworkpolicy_types.go      CRD types, kubebuilder markers
-  zz_generated.deepcopy.go        generated — do not edit by hand
+  fqdnnetworkpolicy_types.go           Namespaced CRD: FQDNNetworkPolicy
+  clusterfqdnnetworkpolicy_types.go    Cluster-scoped CRD: ClusterFQDNNetworkPolicy
+  zz_generated.deepcopy.go            Generated — do not edit by hand
 
 internal/dns/
-  resolver.go                     ActiveResolver: live DNS lookups
-  snoop_resolver.go               SnoopResolver: eBPF passive capture (stub)
-
-internal/netpol/
-  builder.go                      Converts resolved IPs → NetworkPolicy
-  helpers.go                      hostCIDR: /32 for IPv4, /128 for IPv6
+  resolver.go                          ActiveResolver: TTL-aware A+AAAA via miekg/dns
+  multi_resolver.go                    MultiResolver: union of 4 public upstreams
+  snoop_resolver.go                    SnoopResolver: DNS forwarding proxy (records IPs)
+  wildcard_resolver.go                 WildcardResolver: prefix expansion for *.foo.com
+  ip_cache.go                          IPCache: thread-safe TTL-respecting IP store
+  ttl_queue.go                         TTLQueue: min-heap for exact TTL scheduling
 
 internal/controller/
-  fqdnnetworkpolicy_controller.go Reconcile loop: resolve → build → apply → status
+  fqdnnetworkpolicy_controller.go      Namespace-scoped reconcile loop
+  clusterfqdnnetworkpolicy_controller.go  Cluster-scoped reconcile + fanout
 
-cmd/main.go                       Manager setup; swap Resolver implementation here
+internal/netpol/
+  builder.go                           Converts resolved IPs → NetworkPolicy
+  helpers.go                           hostCIDR: /32 IPv4, /128 IPv6
 
+internal/webhook/
+  validate.go                          ValidatingAdmissionWebhook HTTP handler
+
+internal/metrics/
+  metrics.go                           15 Prometheus metrics
+
+cmd/main.go                            Manager setup, flag parsing, resolver wiring
+
+charts/fqdn-network-policy/            Helm chart
 config/
-  crd/bases/                      Generated CRD YAML
-  rbac/role.yaml                  ClusterRole + ClusterRoleBinding for the controller
-  manager/deployment.yaml         Namespace, ServiceAccount, Deployment
-  samples/                        Example FQDNNetworkPolicy CR
+  crd/bases/                           Generated CRD YAML
+  rbac/role.yaml                       ClusterRole + ClusterRoleBinding
+  manager/deployment.yaml             Controller Deployment
+  samples/                             Example CRs
+
+.github/workflows/ci.yml              CI: lint → unit → build → KinD E2E → helm lint
 ```
 
 ## Development
 
-### First-time setup
-
 ```bash
-make build   # runs `make generate` then compiles the manager binary
+make generate   # regenerate zz_generated.deepcopy.go after type changes
+make manifests  # regenerate config/crd/bases/*.yaml and config/rbac/role.yaml
+make build      # compile ./bin/manager
+make run        # run against current kubeconfig context
+
+go test -short ./...         # unit tests (skips network-dependent tests)
+go test -race  ./...         # full test suite including network tests
 ```
 
-`controller-gen` is downloaded to `./bin/` on first run (pinned version, no
-global install needed).
-
-### Codegen
-
-Run `make generate manifests` after changing any CRD type, and commit the
-result. Do not hand-edit `zz_generated.deepcopy.go` or
-`config/crd/bases/*.yaml`; both are overwritten on the next generate run.
-
-```bash
-make generate   # regenerates zz_generated.deepcopy.go
-make manifests  # regenerates config/crd/bases/*.yaml and config/rbac/role.yaml
-```
-
-> If you run `./demo.sh` after changing CRD types without running
-> `make manifests` first, the CRD YAML the script applies will be stale
-> relative to the types the controller compiled against.
-
-### Run locally against a cluster
-
-```bash
-make run   # runs the manager binary against your current kubeconfig context
-```
-
-The controller uses your kubeconfig's current context. It will create and
-update NetworkPolicies in whatever namespaces your FQDNNetworkPolicies live in.
-
-### Validating a policy before applying
-
-```bash
-# Catch schema errors without touching the cluster:
-kubectl apply -f my-policy.yaml --dry-run=client -o yaml
-
-# Run admission webhooks against the live API server without persisting:
-kubectl apply -f my-policy.yaml --dry-run=server
-```
-
-Neither dry-run mode triggers the controller's reconcile loop, so you will not
-see resolved IPs or a generated NetworkPolicy until you apply for real.
+**Codegen note:** do not hand-edit `zz_generated.deepcopy.go` or any file under
+`config/crd/bases/`. Both are overwritten by `make generate` and `make manifests`. Commit
+the generated output alongside any type changes.
 
 ## Known limitations
 
-| Limitation | Workaround / plan |
-|------------|-------------------|
-| Wildcard FQDNs (`*.example.com`) are flagged and skipped | Requires `SnoopResolver` (eBPF DNS capture stub in `internal/dns/snoop_resolver.go`) |
-| Single replica only; no leader election | Add `--leader-elect` flag in `cmd/main.go` before running multiple replicas |
-| No metrics | Resolution failures are security-relevant; expose them via controller-runtime's built-in Prometheus endpoint before production use |
-| Active DNS lookups only | `SnoopResolver` would catch IPs that pods contact before the TTL-based re-queue fires |
+| Limitation | Status |
+|------------|--------|
+| SnoopResolver requires CoreDNS forward configuration | Manual CoreDNS ConfigMap patch; automatic patching is planned |
+| Wildcard expansion via prefix list may miss unusual subdomains | SnoopResolver learns new prefixes dynamically once active |
+| No mTLS / SPIFFE identity-based policy | Use Istio or SPIRE alongside this controller for identity-based controls |
+| No multi-cluster federation | Each cluster runs its own controller; shared policy distribution is not yet implemented |
+| Webhook TLS requires cert-manager or manual cert provisioning | cert-manager integration is included in the Helm chart |
+
+## License
+
+Apache 2.0. See [LICENSE](LICENSE).

@@ -218,3 +218,125 @@ func (in *ResolvedHost) DeepCopy() *ResolvedHost {
 	in.DeepCopyInto(out)
 	return out
 }
+
+// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
+func (in *ClusterFQDNNetworkPolicy) DeepCopyInto(out *ClusterFQDNNetworkPolicy) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	in.Spec.DeepCopyInto(&out.Spec)
+	in.Status.DeepCopyInto(&out.Status)
+}
+
+// DeepCopy is a deepcopy function, copying the receiver, creating a new ClusterFQDNNetworkPolicy.
+func (in *ClusterFQDNNetworkPolicy) DeepCopy() *ClusterFQDNNetworkPolicy {
+	if in == nil {
+		return nil
+	}
+	out := new(ClusterFQDNNetworkPolicy)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyObject is a deepcopy function, copying the receiver, creating a new runtime.Object.
+func (in *ClusterFQDNNetworkPolicy) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
+func (in *ClusterFQDNNetworkPolicyList) DeepCopyInto(out *ClusterFQDNNetworkPolicyList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		in, out := &in.Items, &out.Items
+		*out = make([]ClusterFQDNNetworkPolicy, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+// DeepCopy is a deepcopy function, copying the receiver, creating a new ClusterFQDNNetworkPolicyList.
+func (in *ClusterFQDNNetworkPolicyList) DeepCopy() *ClusterFQDNNetworkPolicyList {
+	if in == nil {
+		return nil
+	}
+	out := new(ClusterFQDNNetworkPolicyList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyObject is a deepcopy function, copying the receiver, creating a new runtime.Object.
+func (in *ClusterFQDNNetworkPolicyList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
+func (in *ClusterFQDNNetworkPolicySpec) DeepCopyInto(out *ClusterFQDNNetworkPolicySpec) {
+	*out = *in
+	in.NamespaceSelector.DeepCopyInto(&out.NamespaceSelector)
+	in.PodSelector.DeepCopyInto(&out.PodSelector)
+	if in.Egress != nil {
+		in, out := &in.Egress, &out.Egress
+		*out = make([]FQDNRule, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+	if in.ResolutionTTLOverride != nil {
+		in, out := &in.ResolutionTTLOverride, &out.ResolutionTTLOverride
+		*out = new(int32)
+		**out = **in
+	}
+}
+
+// DeepCopy is a deepcopy function, copying the receiver, creating a new ClusterFQDNNetworkPolicySpec.
+func (in *ClusterFQDNNetworkPolicySpec) DeepCopy() *ClusterFQDNNetworkPolicySpec {
+	if in == nil {
+		return nil
+	}
+	out := new(ClusterFQDNNetworkPolicySpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
+func (in *ClusterFQDNNetworkPolicyStatus) DeepCopyInto(out *ClusterFQDNNetworkPolicyStatus) {
+	*out = *in
+	if in.ResolvedHosts != nil {
+		in, out := &in.ResolvedHosts, &out.ResolvedHosts
+		*out = make([]ResolvedHost, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+	if in.AffectedNamespaces != nil {
+		in, out := &in.AffectedNamespaces, &out.AffectedNamespaces
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.Conditions != nil {
+		in, out := &in.Conditions, &out.Conditions
+		*out = make([]v1.Condition, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+// DeepCopy is a deepcopy function, copying the receiver, creating a new ClusterFQDNNetworkPolicyStatus.
+func (in *ClusterFQDNNetworkPolicyStatus) DeepCopy() *ClusterFQDNNetworkPolicyStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(ClusterFQDNNetworkPolicyStatus)
+	in.DeepCopyInto(out)
+	return out
+}
