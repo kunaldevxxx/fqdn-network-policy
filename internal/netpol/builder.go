@@ -36,7 +36,7 @@ func Build(fp *netv1alpha1.FQDNNetworkPolicy) (*networkingv1.NetworkPolicy, erro
 	for _, host := range fp.Status.ResolvedHosts {
 		for _, ip := range host.IPs {
 			peers = append(peers, networkingv1.NetworkPolicyPeer{
-				IPBlock: &networkingv1.IPBlock{CIDR: ip + "/32"},
+				IPBlock: &networkingv1.IPBlock{CIDR: hostCIDR(ip)},
 			})
 		}
 	}
