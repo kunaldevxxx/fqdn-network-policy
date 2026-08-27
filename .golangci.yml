@@ -1,20 +1,19 @@
+version: "2"
+
 run:
-  go: "1.26"
   timeout: 5m
 
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
     - govet
     - staticcheck
-    - gosimple
     - ineffassign
     - unused
 
 issues:
   exclude-rules:
-    # Test files frequently ignore errors from Close/Shutdown on cleanup paths.
     - path: "_test\\.go"
       linters:
         - errcheck
