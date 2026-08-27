@@ -219,9 +219,9 @@ jobs:
 
           kubectl wait \
             --namespace e2e-test \
-            --for=condition=Ready \
+            --for=jsonpath='{.status.phase}'=Succeeded \
             pod/e2e-curl \
-            --timeout=30s
+            --timeout=60s
 
           kubectl logs -n e2e-test e2e-curl
 

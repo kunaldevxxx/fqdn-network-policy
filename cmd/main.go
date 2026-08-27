@@ -127,7 +127,7 @@ func main() {
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Resolver: resolver,
-		Recorder: mgr.GetEventRecorderFor("fqdn-network-policy"),
+		Recorder: mgr.GetEventRecorderFor("fqdn-network-policy"), //nolint:staticcheck
 	}).SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to create controller", "controller", "FQDNNetworkPolicy")
 		os.Exit(1)
@@ -138,7 +138,7 @@ func main() {
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Resolver: resolver,
-		Recorder: mgr.GetEventRecorderFor("cluster-fqdn-network-policy"),
+		Recorder: mgr.GetEventRecorderFor("cluster-fqdn-network-policy"), //nolint:staticcheck
 	}).SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to create controller", "controller", "ClusterFQDNNetworkPolicy")
 		os.Exit(1)
