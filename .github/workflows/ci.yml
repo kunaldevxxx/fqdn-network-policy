@@ -144,7 +144,7 @@ jobs:
       - name: Verify NetworkPolicy was generated
         run: |
           for i in $(seq 1 30); do
-            NP=$(kubectl get networkpolicy -n e2e-test fqdnnp-allow-dns-check 2>/dev/null)
+            NP=$(kubectl get networkpolicy -n e2e-test fqdnnp-allow-dns-check 2>/dev/null || true)
             if [ -n "$NP" ]; then
               echo "NetworkPolicy generated successfully"
               kubectl get networkpolicy -n e2e-test fqdnnp-allow-dns-check -o yaml
@@ -194,7 +194,7 @@ jobs:
           kubectl get pods -n fqdn-network-policy-system
           kubectl describe pods -n fqdn-network-policy-system
           kubectl logs -n fqdn-network-policy-system \
-            -l app.kubernetes.io/name=fqdn-network-policy --tail=100
+            -l app=fqdn-network-policy-controller --tail=100
 
   # ── Helm chart lint ───────────────────────────────────────────────────────
   helm-lint:
