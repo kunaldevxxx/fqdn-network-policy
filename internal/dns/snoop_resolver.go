@@ -24,7 +24,6 @@ package dns
 import (
 	"context"
 	"fmt"
-	"net"
 	"sync"
 	"time"
 
@@ -79,30 +78,31 @@ func NewSnoopResolver(listenAddr, upstream string) *SnoopResolver {
 // It blocks until the server is ready or ctx is cancelled.
 func (s *SnoopResolver) Start(ctx context.Context) error {
 	errCh := make(chan error, 1)
+	started := make(chan struct{})
+	s.server.NotifyStartedFunc = func() {
+		s.mu.Lock()
+		s.ready = true
+		s.mu.Unlock()
+		close(started)
+	}
+
 	go func() {
 		if err := s.server.ListenAndServe(); err != nil {
-			errCh <- fmt.Errorf("snoop DNS proxy: %w", err)
+			select {
+			case errCh <- fmt.Errorf("snoop DNS proxy: %w", err):
+			default:
+			}
 		}
 	}()
 
-	// Wait briefly for the server to bind.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if isListening(s.server.Addr) {
-			s.mu.Lock()
-			s.ready = true
-			s.mu.Unlock()
-			return nil
-		}
-		select {
-		case err := <-errCh:
-			return err
-		case <-time.After(50 * time.Millisecond):
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+	select {
+	case <-started:
+		return nil
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return fmt.Errorf("snoop DNS proxy did not become ready on %s within 2s", s.server.Addr)
 }
 
 // Shutdown stops the DNS proxy server gracefully.
@@ -183,16 +183,6 @@ func (s *SnoopResolver) handleQuery(w mdns.ResponseWriter, req *mdns.Msg) {
 	}
 
 	_ = w.WriteMsg(resp)
-}
-
-// isListening probes whether addr is accepting UDP connections.
-func isListening(addr string) bool {
-	conn, err := net.DialTimeout("udp", addr, 200*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
 }
 
 // unionIPs returns a deduplicated union of two IP slices.

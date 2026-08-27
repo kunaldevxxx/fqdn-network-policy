@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+
   pull_request:
     branches: [main]
 
@@ -10,79 +11,104 @@ env:
   GO_VERSION: "1.26"
 
 jobs:
-  # ── Static analysis ────────────────────────────────────────────────────────
   lint:
     name: Lint
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
           version: latest
+          install-mode: goinstall
           args: --timeout=5m
 
-  # ── Unit tests ─────────────────────────────────────────────────────────────
+# ── Unit tests ─────────────────────────────────────────────────────────────
+
   unit:
     name: Unit Tests
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+
       - name: Run unit tests
         run: |
           go test -short -race -coverprofile=coverage.out \
             ./internal/dns/... \
             ./internal/netpol/... \
             ./internal/webhook/...
+
       - name: Coverage report
         run: go tool cover -func=coverage.out
+
       - name: Enforce minimum coverage
         run: |
           COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
+
           echo "Total coverage: ${COVERAGE}%"
-          awk "BEGIN { if ($COVERAGE < 60) { print \"Coverage $COVERAGE% is below 60% minimum\"; exit 1 } }"
-      - uses: actions/upload-artifact@v4
+
+          awk "BEGIN {
+            if ($COVERAGE < 60) {
+              print \"Coverage $COVERAGE% is below 60% minimum\"
+              exit 1
+            }
+          }"
+
+      - uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: coverage.out
 
-  # ── Build ──────────────────────────────────────────────────────────────────
+# ── Build ──────────────────────────────────────────────────────────────────
+
   build:
     name: Build
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+
       - name: Build controller binary
         run: go build -o bin/manager ./cmd/...
+
       - name: go vet
         run: go vet ./...
 
-  # ── E2E on KinD ───────────────────────────────────────────────────────────
+# ── E2E on KinD ───────────────────────────────────────────────────────────
+
   e2e:
     name: E2E (KinD)
     runs-on: ubuntu-latest
     needs: [unit, build]
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Create KinD cluster with Calico CNI
-        uses: helm/kind-action@v1.10.0
+        uses: helm/kind-action@v1.14.0
         with:
           cluster_name: fqdn-e2e
           config: .github/kind-config.yaml
@@ -90,8 +116,11 @@ jobs:
       - name: Install Calico CNI
         run: |
           kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml
-          kubectl wait --namespace kube-system \
-            --for=condition=Ready pods --selector=k8s-app=calico-node \
+
+          kubectl wait \
+            --namespace kube-system \
+            --for=condition=Ready pods \
+            --selector=k8s-app=calico-node \
             --timeout=120s
 
       - name: Build and load controller image
@@ -105,19 +134,31 @@ jobs:
       - name: Deploy controller
         run: |
           kubectl create namespace fqdn-network-policy-system
-          kubectl apply -f config/rbac/role.yaml
+
+          kubectl apply -f config/rbac/
           kubectl apply -f config/manager/deployment.yaml
+
+          kubectl set image deployment/fqdn-network-policy-controller \
+            manager=fqdn-controller:e2e \
+            -n fqdn-network-policy-system
+
+          kubectl patch deployment fqdn-network-policy-controller \
+            -n fqdn-network-policy-system \
+            -p '{"spec":{"template":{"spec":{"containers":[{"name":"manager","imagePullPolicy":"IfNotPresent"}]}}}}'
 
       - name: Wait for controller ready
         run: |
-          kubectl wait --namespace fqdn-network-policy-system \
-            --for=condition=Available deployment/fqdn-network-policy-controller \
-            --timeout=60s
+          kubectl wait \
+            --namespace fqdn-network-policy-system \
+            --for=condition=Available \
+            deployment/fqdn-network-policy-controller \
+            --timeout=120s
 
       - name: Apply test FQDNNetworkPolicy
         run: |
           kubectl create namespace e2e-test
-          kubectl apply -f - <<EOF
+
+          kubectl apply -f - <<'EOF'
           apiVersion: netsec.kunal.dev/v1alpha1
           kind: FQDNNetworkPolicy
           metadata:
@@ -139,31 +180,54 @@ jobs:
       - name: Verify NetworkPolicy was generated
         run: |
           for i in $(seq 1 30); do
-            NP=$(kubectl get networkpolicy -n e2e-test fqdnnp-allow-dns-check 2>/dev/null)
+            NP=$(kubectl get networkpolicy \
+              -n e2e-test \
+              fqdnnp-allow-dns-check \
+              2>/dev/null || true)
+
             if [ -n "$NP" ]; then
               echo "NetworkPolicy generated successfully"
-              kubectl get networkpolicy -n e2e-test fqdnnp-allow-dns-check -o yaml
+
+              kubectl get networkpolicy \
+                -n e2e-test \
+                fqdnnp-allow-dns-check \
+                -o yaml
+
               exit 0
             fi
+
             echo "Waiting for NetworkPolicy... attempt $i/30"
             sleep 2
           done
+
           echo "ERROR: NetworkPolicy was not generated within 60s"
-          kubectl get fqdnnetworkpolicies -n e2e-test -o yaml
+
+          kubectl get fqdnnetworkpolicies \
+            -n e2e-test \
+            -o yaml
+
           exit 1
 
       - name: Verify allowed endpoint reachable
         run: |
-          kubectl run e2e-curl --image=curlimages/curl --restart=Never \
-            --namespace=e2e-test --labels=app=e2e-test \
+          kubectl run e2e-curl \
+            --image=curlimages/curl \
+            --restart=Never \
+            --namespace=e2e-test \
+            --labels=app=e2e-test \
             -- curl -sf --connect-timeout 10 https://one.one.one.one
-          kubectl wait --namespace e2e-test \
-            --for=condition=Ready pod/e2e-curl --timeout=30s
+
+          kubectl wait \
+            --namespace e2e-test \
+            --for=jsonpath='{.status.phase}'=Succeeded \
+            pod/e2e-curl \
+            --timeout=60s
+
           kubectl logs -n e2e-test e2e-curl
 
       - name: Verify audit mode does NOT write NetworkPolicy
         run: |
-          kubectl apply -f - <<EOF
+          kubectl apply -f - <<'EOF'
           apiVersion: netsec.kunal.dev/v1alpha1
           kind: FQDNNetworkPolicy
           metadata:
@@ -176,33 +240,55 @@ jobs:
             egress:
               - match: example.com
           EOF
+
           sleep 10
-          if kubectl get networkpolicy -n e2e-test fqdnnp-audit-policy 2>/dev/null; then
+
+          if kubectl get networkpolicy \
+            -n e2e-test \
+            fqdnnp-audit-policy \
+            2>/dev/null; then
+
             echo "ERROR: Audit mode should not create a NetworkPolicy"
             exit 1
           fi
+
           echo "Audit mode correctly suppressed NetworkPolicy creation"
 
       - name: Collect controller logs on failure
         if: failure()
         run: |
-          kubectl logs -n fqdn-network-policy-system \
-            -l app.kubernetes.io/name=fqdn-network-policy --tail=100
+          kubectl get pods \
+            -n fqdn-network-policy-system
 
-  # ── Helm chart lint ───────────────────────────────────────────────────────
+          kubectl describe pods \
+            -n fqdn-network-policy-system
+
+          kubectl logs \
+            -n fqdn-network-policy-system \
+            -l app=fqdn-network-policy-controller \
+            --tail=100
+
+# ── Helm chart lint ───────────────────────────────────────────────────────
+
   helm-lint:
     name: Helm Lint
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@v6
+
+      - uses: azure/setup-helm@v5
+
       - name: Lint chart
         run: helm lint charts/fqdn-network-policy/
+
       - name: Template chart (dry-run)
         run: |
-          helm template fqdn-network-policy charts/fqdn-network-policy/ \
+          helm template fqdn-network-policy \
+            charts/fqdn-network-policy/ \
             --set image.tag=latest \
             --set leaderElection.enabled=true \
             --set multiResolver.enabled=true \
             > /dev/null
+
           echo "Helm template rendered successfully"
