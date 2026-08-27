@@ -50,46 +50,9 @@ in-kernel packet interception.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  FQDNNetworkPolicy / ClusterFQDNNetworkPolicy (your CRs)        │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │ reconcile loop
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Resolver (pluggable)                                            │
-│                                                                  │
-│  SnoopResolver ──► DNS forwarding proxy on :5353                 │
-│      │              intercepts CoreDNS responses                  │
-│      │              records exact IPs pods received               │
-│      │                                                            │
-│  MultiResolver ──► queries 1.1.1.1, 8.8.8.8, 9.9.9.9, OpenDNS  │
-│      │              concurrently; unions results                  │
-│      │              covers ~85% of CDN IP divergence              │
-│      │                                                            │
-│  ActiveResolver ──► plain A + AAAA lookups via miekg/dns         │
-│                      extracts real TTL values                     │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │ A + AAAA IPs, min(TTL)
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  TTL Queue (min-heap)                                            │
-│  schedules next reconcile at DNS TTL expiry (5s–300s)           │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  netpol.Build                                                    │
-│  resolved IPs → ipBlock CIDRs (/32 IPv4, /128 IPv6)             │
-│  skips NetworkPolicy update when IP set is unchanged            │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Kubernetes NetworkPolicy                                        │
-│  enforced by Calico / AWS VPC CNI / Azure CNI / Flannel          │
-└─────────────────────────────────────────────────────────────────┘
-```
+<img width="1853" height="1968" alt="mermaid-diagram-2026-08-27-111233" src="https://github.com/user-attachments/assets/f36e198b-33d0-4ddc-ba25-98a444a5e611" />
+
+
 
 **Fail-closed:** if no hosts have resolved yet (first reconcile, cold start, all lookups failed),
 the controller emits a deny-all-egress policy rather than a permissive no-op. DNS egress
