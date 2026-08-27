@@ -191,7 +191,7 @@ func isListening(addr string) bool {
 	if err != nil {
 		return false
 	}
-	_ = conn.Close()
+	conn.Close()
 	return true
 }
 
