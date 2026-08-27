@@ -69,8 +69,10 @@ func startMockDNS(t *testing.T, answers map[string][]string) (addr string, stop 
 	return serverAddr, func() { _ = srv.Shutdown() }
 }
 
-// freeUDPAddr returns a 127.0.0.1:N address whose port was free at call time.
-// There is a small race between Close and the caller binding it; acceptable in tests.
+// freeUDPAddr returns a 127.0.0.1:port string whose port was free at call time.
+// With NotifyStartedFunc in SnoopResolver.Start, the server blocks until it
+// has actually bound -- so by the time Start returns the port is in use and
+// there is no observable race for the test client.
 func freeUDPAddr(t *testing.T) string {
 	t.Helper()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -144,18 +146,6 @@ func TestTTLQueue_Pop(t *testing.T) {
 	got := heap.Pop(q).(*TTLEntry)
 	assert.Equal(t, "fast.example.com", got.Hostname)
 	assert.Equal(t, 1, q.Len())
-}
-
-// ── isListening ────────────────────────────────────────────────────────────
-
-func TestIsListening_Active(t *testing.T) {
-	// isListening uses UDP dial; test only the positive case since UDP dial
-	// behaviour for unreachable ports is platform-dependent (macOS does not
-	// return ICMP port-unreachable on loopback).
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer pc.Close()
-	assert.True(t, isListening(pc.LocalAddr().String()))
 }
 
 // ── queryUpstream ──────────────────────────────────────────────────────────
