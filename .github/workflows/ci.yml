@@ -83,7 +83,7 @@ jobs:
           cache: true
 
       - name: Create KinD cluster with Calico CNI
-        uses: helm/kind-action@v1.10.0
+        uses: helm/kind-action@v1.12.0
         with:
           cluster_name: fqdn-e2e
           config: .github/kind-config.yaml
@@ -106,14 +106,18 @@ jobs:
       - name: Deploy controller
         run: |
           kubectl create namespace fqdn-network-policy-system
-          kubectl apply -f config/rbac/role.yaml
+          kubectl apply -f config/rbac/
           kubectl apply -f config/manager/deployment.yaml
+          kubectl set image deployment/fqdn-network-policy-controller \
+            manager=fqdn-controller:e2e -n fqdn-network-policy-system
+          kubectl patch deployment fqdn-network-policy-controller -n fqdn-network-policy-system \
+            -p '{"spec":{"template":{"spec":{"containers":[{"name":"manager","imagePullPolicy":"IfNotPresent"}]}}}}'
 
       - name: Wait for controller ready
         run: |
           kubectl wait --namespace fqdn-network-policy-system \
             --for=condition=Available deployment/fqdn-network-policy-controller \
-            --timeout=60s
+            --timeout=120s
 
       - name: Apply test FQDNNetworkPolicy
         run: |
@@ -187,6 +191,8 @@ jobs:
       - name: Collect controller logs on failure
         if: failure()
         run: |
+          kubectl get pods -n fqdn-network-policy-system
+          kubectl describe pods -n fqdn-network-policy-system
           kubectl logs -n fqdn-network-policy-system \
             -l app.kubernetes.io/name=fqdn-network-policy --tail=100
 
