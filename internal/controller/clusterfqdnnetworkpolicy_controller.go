@@ -79,10 +79,23 @@ func (r *ClusterFQDNNetworkPolicyReconciler) Reconcile(ctx context.Context, req 
 			ttl = defaultPollInterval
 		}
 		ttlQueue.Upsert(rule.Match, ttl)
-		metrics.ResolvedIPsCount.WithLabelValues(rule.Match).Set(float64(len(res.IPs)))
+		// Drop private / loopback / link-local IPs per security policy.
+		allowedIPs, blockedIPs := filterBlockedIPs(res.IPs, cp.Spec.Security)
+		for _, b := range blockedIPs {
+			msg := b.message(rule.Match)
+			resolutionErrors = append(resolutionErrors, msg)
+			logger.Info("blocked private IP", "hostname", rule.Match, "ip", b.IP, "cidr", b.CIDR)
+			r.Recorder.Eventf(&cp, "Warning", "PrivateIPBlocked", "%s", msg)
+		}
+		if len(allowedIPs) == 0 && len(blockedIPs) > 0 {
+			metrics.ResolvedIPsCount.WithLabelValues(rule.Match).Set(0)
+			continue
+		}
+
+		metrics.ResolvedIPsCount.WithLabelValues(rule.Match).Set(float64(len(allowedIPs)))
 		resolved = append(resolved, netv1alpha1.ResolvedHost{
 			Hostname:   rule.Match,
-			IPs:        res.IPs,
+			IPs:        allowedIPs,
 			CNAMEChain: res.CNAMEChain,
 			LastSeen:   metav1.Now(),
 			Source:     "active-lookup",
