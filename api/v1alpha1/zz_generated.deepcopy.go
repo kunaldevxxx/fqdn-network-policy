@@ -106,6 +106,11 @@ func (in *FQDNNetworkPolicySpec) DeepCopyInto(out *FQDNNetworkPolicySpec) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.Security != nil {
+		in, out := &in.Security, &out.Security
+		*out = new(SecuritySpec)
+		(*in).DeepCopyInto(*out)
+	}
 }
 
 // DeepCopy is a deepcopy function, copying the receiver, creating a new FQDNNetworkPolicySpec.
@@ -206,6 +211,11 @@ func (in *ResolvedHost) DeepCopyInto(out *ResolvedHost) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.CNAMEChain != nil {
+		in, out := &in.CNAMEChain, &out.CNAMEChain
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	in.LastSeen.DeepCopyInto(&out.LastSeen)
 }
 
@@ -295,6 +305,11 @@ func (in *ClusterFQDNNetworkPolicySpec) DeepCopyInto(out *ClusterFQDNNetworkPoli
 		*out = new(int32)
 		**out = **in
 	}
+	if in.Security != nil {
+		in, out := &in.Security, &out.Security
+		*out = new(SecuritySpec)
+		(*in).DeepCopyInto(*out)
+	}
 }
 
 // DeepCopy is a deepcopy function, copying the receiver, creating a new ClusterFQDNNetworkPolicySpec.
@@ -337,6 +352,26 @@ func (in *ClusterFQDNNetworkPolicyStatus) DeepCopy() *ClusterFQDNNetworkPolicySt
 		return nil
 	}
 	out := new(ClusterFQDNNetworkPolicyStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
+func (in *SecuritySpec) DeepCopyInto(out *SecuritySpec) {
+	*out = *in
+	if in.MaxCNAMEDepth != nil {
+		in, out := &in.MaxCNAMEDepth, &out.MaxCNAMEDepth
+		*out = new(int32)
+		**out = **in
+	}
+}
+
+// DeepCopy is a deepcopy function, copying the receiver, creating a new SecuritySpec.
+func (in *SecuritySpec) DeepCopy() *SecuritySpec {
+	if in == nil {
+		return nil
+	}
+	out := new(SecuritySpec)
 	in.DeepCopyInto(out)
 	return out
 }

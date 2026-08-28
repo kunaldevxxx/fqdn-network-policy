@@ -85,6 +85,20 @@ type FQDNNetworkPolicySpec struct {
 	// reducing geo-DNS divergence between the controller and workload pods.
 	// +optional
 	CoreDNSAddress string `json:"coreDNSAddress,omitempty"`
+
+	// Security defines security-related constraints on FQDN resolution.
+	// +optional
+	Security *SecuritySpec `json:"security,omitempty"`
+}
+
+// SecuritySpec defines security-related constraints on FQDN resolution.
+type SecuritySpec struct {
+	// MaxCNAMEDepth is the maximum allowed CNAME chain length before the
+	// controller raises a Degraded condition. 0 or unset means no limit.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=10
+	MaxCNAMEDepth *int32 `json:"maxCNAMEDepth,omitempty"`
 }
 
 // ResolvedHost records the last known IPs for one matched hostname.
@@ -98,6 +112,10 @@ type ResolvedHost struct {
 	// TTLSeconds is the DNS TTL of the last response, in seconds.
 	// +optional
 	TTLSeconds int32 `json:"ttlSeconds,omitempty"`
+	// CNAMEChain holds the ordered CNAME targets from the queried hostname to
+	// the final canonical name. Empty when the name resolved without CNAME indirection.
+	// +optional
+	CNAMEChain []string `json:"cnameChain,omitempty"`
 }
 
 // FQDNNetworkPolicyStatus defines the observed state.

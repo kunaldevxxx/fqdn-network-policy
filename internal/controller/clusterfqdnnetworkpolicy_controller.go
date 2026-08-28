@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -82,10 +83,19 @@ func (r *ClusterFQDNNetworkPolicyReconciler) Reconcile(ctx context.Context, req 
 		resolved = append(resolved, netv1alpha1.ResolvedHost{
 			Hostname:   rule.Match,
 			IPs:        res.IPs,
+			CNAMEChain: res.CNAMEChain,
 			LastSeen:   metav1.Now(),
 			Source:     "active-lookup",
 			TTLSeconds: int32(ttl.Seconds()),
 		})
+
+		if cp.Spec.Security != nil && cp.Spec.Security.MaxCNAMEDepth != nil {
+			if maxDepth := int(*cp.Spec.Security.MaxCNAMEDepth); maxDepth > 0 && len(res.CNAMEChain) > maxDepth {
+				resolutionErrors = append(resolutionErrors,
+					fmt.Sprintf("%s: CNAME chain depth %d exceeds maxCNAMEDepth %d",
+						rule.Match, len(res.CNAMEChain), maxDepth))
+			}
+		}
 	}
 
 	// List namespaces whose labels match the NamespaceSelector.

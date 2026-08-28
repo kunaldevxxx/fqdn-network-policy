@@ -38,6 +38,10 @@ type ClusterFQDNNetworkPolicySpec struct {
 	// CoreDNSAddress is the host:port of the cluster DNS server to query directly.
 	// +optional
 	CoreDNSAddress string `json:"coreDNSAddress,omitempty"`
+
+	// Security defines security-related constraints on FQDN resolution.
+	// +optional
+	Security *SecuritySpec `json:"security,omitempty"`
 }
 
 // ClusterFQDNNetworkPolicyStatus defines the observed state.

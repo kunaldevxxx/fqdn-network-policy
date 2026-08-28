@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	mdns "github.com/miekg/dns"
@@ -24,6 +25,10 @@ const (
 type Resolution struct {
 	Hostname string
 	IPs      []string
+	// CNAMEChain holds the ordered CNAME targets from the queried hostname to
+	// the final canonical name (trailing dots stripped). Empty when the name
+	// resolves directly without CNAME indirection.
+	CNAMEChain []string
 	// TTL is the clamped minimum TTL across all returned records.
 	// Zero means "use the default poll interval".
 	TTL time.Duration
@@ -71,16 +76,17 @@ func (a *ActiveResolver) Resolve(ctx context.Context, hostname string) (Resoluti
 
 	// Resolve A and AAAA concurrently.
 	type result struct {
-		ips []string
-		ttl time.Duration
-		err error
+		ips        []string
+		cnameChain []string
+		ttl        time.Duration
+		err        error
 	}
 	ch := make(chan result, 2)
 
 	for _, qtype := range []uint16{mdns.TypeA, mdns.TypeAAAA} {
 		go func(qt uint16) {
-			ips, ttl, err := a.query(hostname, qt)
-			ch <- result{ips: ips, ttl: ttl, err: err}
+			ips, chain, ttl, err := a.query(hostname, qt)
+			ch <- result{ips: ips, cnameChain: chain, ttl: ttl, err: err}
 		}(qtype)
 	}
 
@@ -98,6 +104,9 @@ func (a *ActiveResolver) Resolve(ctx context.Context, hostname string) (Resoluti
 		if r.ttl < minTTL {
 			minTTL = r.ttl
 		}
+		if len(res.CNAMEChain) == 0 {
+			res.CNAMEChain = r.cnameChain
+		}
 	}
 
 	if len(res.IPs) == 0 {
@@ -111,7 +120,7 @@ func (a *ActiveResolver) Resolve(ctx context.Context, hostname string) (Resoluti
 	return res, nil
 }
 
-func (a *ActiveResolver) query(hostname string, qtype uint16) ([]string, time.Duration, error) {
+func (a *ActiveResolver) query(hostname string, qtype uint16) ([]string, []string, time.Duration, error) {
 	fqdn := mdns.Fqdn(hostname)
 	msg := new(mdns.Msg)
 	msg.SetQuestion(fqdn, qtype)
@@ -120,21 +129,25 @@ func (a *ActiveResolver) query(hostname string, qtype uint16) ([]string, time.Du
 	resp, _, err := a.client.Exchange(msg, a.Nameserver)
 	if err != nil {
 		// Fall back to system resolver for this record type; TTL unknown.
-		return a.fallbackLookup(hostname, qtype)
+		ips, ttl, ferr := a.fallbackLookup(hostname, qtype)
+		return ips, nil, ttl, ferr
 	}
 	if resp.Rcode != mdns.RcodeSuccess {
 		// NXDOMAIN or SERVFAIL for this record type is not fatal (e.g. an
 		// IPv4-only host returns NXDOMAIN for AAAA); return empty.
 		if resp.Rcode == mdns.RcodeNameError {
-			return nil, ttlCeiling, nil
+			return nil, nil, ttlCeiling, nil
 		}
-		return nil, 0, fmt.Errorf("DNS rcode %s for %s type %d", mdns.RcodeToString[resp.Rcode], hostname, qtype)
+		return nil, nil, 0, fmt.Errorf("DNS rcode %s for %s type %d", mdns.RcodeToString[resp.Rcode], hostname, qtype)
 	}
 
 	var ips []string
+	var cnameChain []string
 	minTTL := uint32(ttlCeiling / time.Second)
 	for _, rr := range resp.Answer {
 		switch v := rr.(type) {
+		case *mdns.CNAME:
+			cnameChain = append(cnameChain, strings.TrimSuffix(v.Target, "."))
 		case *mdns.A:
 			ips = append(ips, v.A.String())
 			if v.Hdr.Ttl < minTTL {
@@ -147,7 +160,7 @@ func (a *ActiveResolver) query(hostname string, qtype uint16) ([]string, time.Du
 			}
 		}
 	}
-	return ips, time.Duration(minTTL) * time.Second, nil
+	return ips, cnameChain, time.Duration(minTTL) * time.Second, nil
 }
 
 // fallbackLookup uses net.DefaultResolver when the miekg exchange fails.

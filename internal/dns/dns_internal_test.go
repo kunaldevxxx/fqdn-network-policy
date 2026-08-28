@@ -157,7 +157,7 @@ func TestQueryUpstream_IPv4(t *testing.T) {
 	defer stop()
 
 	c := &mdns.Client{Net: "udp", Timeout: 3 * time.Second}
-	ips, ttl, err := queryUpstream(c, "api.example.com", addr, mdns.TypeA)
+	ips, _, ttl, err := queryUpstream(c, "api.example.com", addr, mdns.TypeA)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"1.2.3.4"}, ips)
 	assert.Greater(t, ttl, time.Duration(0))
@@ -170,7 +170,7 @@ func TestQueryUpstream_IPv6(t *testing.T) {
 	defer stop()
 
 	c := &mdns.Client{Net: "udp", Timeout: 3 * time.Second}
-	ips, _, err := queryUpstream(c, "api.example.com", addr, mdns.TypeAAAA)
+	ips, _, _, err := queryUpstream(c, "api.example.com", addr, mdns.TypeAAAA)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"2001:db8::1"}, ips)
 }
@@ -180,7 +180,7 @@ func TestQueryUpstream_NXDOMAIN(t *testing.T) {
 	defer stop()
 
 	c := &mdns.Client{Net: "udp", Timeout: 3 * time.Second}
-	ips, _, err := queryUpstream(c, "unknown.example.com", addr, mdns.TypeA)
+	ips, _, _, err := queryUpstream(c, "unknown.example.com", addr, mdns.TypeA)
 	require.NoError(t, err)
 	assert.Empty(t, ips)
 }
@@ -352,4 +352,53 @@ func TestWildcardResolver_LearnedPrefixExpanded(t *testing.T) {
 	res, err := wr.Resolve(context.Background(), "*.example.com")
 	require.NoError(t, err)
 	assert.Contains(t, res.IPs, "9.9.9.9")
+}
+
+// ── CNAME chain ────────────────────────────────────────────────────────────
+
+func TestQueryUpstream_CNAMEChain(t *testing.T) {
+	// api.example.com → CNAME → foo.cdn.com → CNAME → edge.net → A 1.2.3.4
+	mux := mdns.NewServeMux()
+	mux.HandleFunc(".", func(w mdns.ResponseWriter, req *mdns.Msg) {
+		resp := new(mdns.Msg)
+		resp.SetReply(req)
+		for _, q := range req.Question {
+			if q.Name == "api.example.com." && q.Qtype == mdns.TypeA {
+				resp.Answer = []mdns.RR{
+					&mdns.CNAME{
+						Hdr:    mdns.RR_Header{Name: "api.example.com.", Rrtype: mdns.TypeCNAME, Class: mdns.ClassINET, Ttl: 60},
+						Target: "foo.cdn.com.",
+					},
+					&mdns.CNAME{
+						Hdr:    mdns.RR_Header{Name: "foo.cdn.com.", Rrtype: mdns.TypeCNAME, Class: mdns.ClassINET, Ttl: 60},
+						Target: "edge.net.",
+					},
+					&mdns.A{
+						Hdr: mdns.RR_Header{Name: "edge.net.", Rrtype: mdns.TypeA, Class: mdns.ClassINET, Ttl: 60},
+						A:   net.ParseIP("1.2.3.4").To4(),
+					},
+				}
+			}
+		}
+		_ = w.WriteMsg(resp)
+	})
+
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv := &mdns.Server{PacketConn: pc, Net: "udp", Handler: mux}
+	ready := make(chan struct{})
+	srv.NotifyStartedFunc = func() { close(ready) }
+	go func() { _ = srv.ActivateAndServe() }()
+	select {
+	case <-ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("mock DNS server did not start within 2s")
+	}
+	defer func() { _ = srv.Shutdown() }()
+
+	c := &mdns.Client{Net: "udp", Timeout: 3 * time.Second}
+	ips, chain, _, err := queryUpstream(c, "api.example.com", pc.LocalAddr().String(), mdns.TypeA)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"1.2.3.4"}, ips)
+	assert.Equal(t, []string{"foo.cdn.com", "edge.net"}, chain)
 }

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"sort"
 	"strings"
@@ -96,10 +97,19 @@ func (r *FQDNNetworkPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		resolved = append(resolved, netv1alpha1.ResolvedHost{
 			Hostname:   rule.Match,
 			IPs:        res.IPs,
+			CNAMEChain: res.CNAMEChain,
 			LastSeen:   metav1.Now(),
 			Source:     "active-lookup",
 			TTLSeconds: int32(ttl.Seconds()),
 		})
+
+		if fp.Spec.Security != nil && fp.Spec.Security.MaxCNAMEDepth != nil {
+			if maxDepth := int(*fp.Spec.Security.MaxCNAMEDepth); maxDepth > 0 && len(res.CNAMEChain) > maxDepth {
+				resolutionErrors = append(resolutionErrors,
+					fmt.Sprintf("%s: CNAME chain depth %d exceeds maxCNAMEDepth %d",
+						rule.Match, len(res.CNAMEChain), maxDepth))
+			}
+		}
 	}
 
 	// Audit mode: log only, no NetworkPolicy writes.
