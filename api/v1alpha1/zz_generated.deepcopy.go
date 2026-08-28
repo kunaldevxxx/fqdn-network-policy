@@ -364,6 +364,21 @@ func (in *SecuritySpec) DeepCopyInto(out *SecuritySpec) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.BlockPrivateIPs != nil {
+		in, out := &in.BlockPrivateIPs, &out.BlockPrivateIPs
+		*out = new(bool)
+		**out = **in
+	}
+	if in.BlockLoopback != nil {
+		in, out := &in.BlockLoopback, &out.BlockLoopback
+		*out = new(bool)
+		**out = **in
+	}
+	if in.BlockLinkLocal != nil {
+		in, out := &in.BlockLinkLocal, &out.BlockLinkLocal
+		*out = new(bool)
+		**out = **in
+	}
 }
 
 // DeepCopy is a deepcopy function, copying the receiver, creating a new SecuritySpec.

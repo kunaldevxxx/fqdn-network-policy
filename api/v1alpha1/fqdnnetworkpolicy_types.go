@@ -99,6 +99,23 @@ type SecuritySpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=10
 	MaxCNAMEDepth *int32 `json:"maxCNAMEDepth,omitempty"`
+
+	// BlockPrivateIPs drops RFC1918 (10/8, 172.16/12, 192.168/16) and CGNAT
+	// (100.64/10) addresses from the resolved allow-list and raises a Degraded
+	// condition. Defaults to true; set to false only in split-horizon DNS
+	// environments where private egress is intentional.
+	// +optional
+	BlockPrivateIPs *bool `json:"blockPrivateIPs,omitempty"`
+
+	// BlockLoopback drops loopback addresses (127.0.0.0/8, ::1/128) from the
+	// resolved allow-list. Defaults to true.
+	// +optional
+	BlockLoopback *bool `json:"blockLoopback,omitempty"`
+
+	// BlockLinkLocal drops link-local addresses (169.254.0.0/16, fe80::/10)
+	// from the resolved allow-list. Defaults to true.
+	// +optional
+	BlockLinkLocal *bool `json:"blockLinkLocal,omitempty"`
 }
 
 // ResolvedHost records the last known IPs for one matched hostname.
