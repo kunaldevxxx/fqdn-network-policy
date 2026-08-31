@@ -60,6 +60,13 @@ demo: docker-build ## Run the full kind+Calico demo end to end.
 demo-clean: ## Tear down the demo kind cluster.
 	kind delete cluster --name fqdn-demo
 
+.PHONY: kubectl-plugin
+kubectl-plugin: ## Build the kubectl-fqdn_policy plugin binary to bin/.
+	go build -o bin/kubectl-fqdn_policy ./cmd/kubectl-fqdn_policy/
+	@echo ""
+	@echo "Install: cp bin/kubectl-fqdn_policy /usr/local/bin/"
+	@echo "Usage:   kubectl fqdn-policy preview policy.yaml"
+
 ## ---- Housekeeping ---------------------------------------------------
 
 .PHONY: fmt

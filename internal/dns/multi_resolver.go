@@ -167,3 +167,27 @@ func uniqueStrings(in []string) []string {
 	}
 	return out
 }
+
+// UpstreamResult holds the resolution result from one upstream server.
+type UpstreamResult struct {
+	Upstream string
+	IPs      []string
+}
+
+// ResolvePerUpstream queries each configured upstream independently and
+// returns per-upstream results. Used by the kubectl plugin for divergence
+// detection — callers can inspect which IPs appeared in fewer than all resolvers.
+func (m *MultiResolver) ResolvePerUpstream(_ context.Context, hostname string) []UpstreamResult {
+	results := make([]UpstreamResult, 0, len(m.upstreams))
+	for _, ups := range m.upstreams {
+		var ips []string
+		for _, qt := range []uint16{mdns.TypeA, mdns.TypeAAAA} {
+			got, _, _, _ := queryUpstream(m.client, hostname, ups, qt)
+			ips = append(ips, got...)
+		}
+		if len(ips) > 0 {
+			results = append(results, UpstreamResult{Upstream: ups, IPs: ips})
+		}
+	}
+	return results
+}
