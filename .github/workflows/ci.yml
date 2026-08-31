@@ -87,7 +87,10 @@ jobs:
           cache: true
 
       - name: Build controller binary
-        run: go build -o bin/manager ./cmd/...
+        run: go build -o bin/manager ./cmd/
+
+      - name: Build kubectl plugin
+        run: go build -o bin/kubectl-fqdn_policy ./cmd/kubectl-fqdn_policy/
 
       - name: go vet
         run: go vet ./...
