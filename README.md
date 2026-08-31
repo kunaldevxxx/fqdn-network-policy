@@ -1,5 +1,10 @@
 # fqdn-network-policy
 
+[![CI](https://github.com/kunaldevxxx/fqdn-network-policy/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kunaldevxxx/fqdn-network-policy/actions/workflows/ci.yml)
+[![E2E KinD](https://github.com/kunaldevxxx/fqdn-network-policy/actions/workflows/ci.yml/badge.svg?branch=main&label=E2E+KinD)](https://github.com/kunaldevxxx/fqdn-network-policy/actions/workflows/ci.yml)
+[![Go 1.26](https://img.shields.io/badge/go-1.26-00ADD8?logo=go)](https://go.dev/doc/go1.26)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+
 FQDN-based egress control for Kubernetes clusters on **any CNI** — Calico, AWS VPC CNI,
 Azure CNI, Flannel, or anything else that enforces standard `networking.k8s.io/v1 NetworkPolicy`.
 
@@ -36,6 +41,26 @@ GitHub, S3, auth providers — rotate IPs continuously with short DNS TTLs, run 
 anycast routing, and return different IPs to different callers. Maintaining hand-curated CIDR
 lists is error-prone and breaks silently. This controller keeps those lists current automatically.
 
+## How it compares
+
+| Feature | **fqdn-network-policy** | Cilium FQDNNetworkPolicy | Calico FQDN policy | Antrea FQDN | Istio Egress |
+|---|---|---|---|---|---|
+| **CNI requirement** | **None — any CNI** | Cilium only | Calico only | Antrea only | None |
+| **Sidecar required** | No | No | No | No | Yes (Envoy) |
+| **DNS resolution method** | Active + 4-resolver union + eBPF snoop | eBPF kernel intercept | DNS poll | DNS proxy | SNI inspection |
+| **Produces standard `NetworkPolicy`** | **Yes** | No — Cilium CRD | No — Calico CRD | No — Antrea CRD | No — VirtualService |
+| **CDN / anycast accuracy** | ~85 % (4 resolvers) | Near-exact | ~70 % | Moderate | SNI-based |
+| **Wildcard rules** | Prefix expansion / snoop | Yes | Yes | Yes | Yes |
+| **Cluster-wide policy** | Yes (`ClusterFQDNNetworkPolicy`) | Yes | Yes | Yes | Yes |
+| **`kubectl` preview plugin** | **Yes** — `kubectl fqdn-policy preview` | No | No | No | No |
+| **DNS rebinding protection** | **Yes** — `blockPrivateIPs` default | Partial | No | No | N/A |
+| **CNAME chain visibility** | **Yes** — surfaced in status | No | No | No | No |
+| **Multi-upstream resolver** | **Yes** — unions Cloudflare, Google, Quad9, OpenDNS | No | No | No | No |
+| **Infrastructure additions** | None | Replace CNI | Replace CNI | Replace CNI | Service mesh |
+
+> **Choose Cilium** if you need exact per-pod DNS accuracy at scale and can replace your CNI.
+> **Choose this project** if you need portable egress control on the CNI you already run, with zero infrastructure additions.
+
 **When to use this instead of Cilium or Istio:**
 - You run Calico, AWS VPC CNI, Azure CNI, or Flannel and cannot or do not want to replace your CNI.
 - You need lightweight egress control with zero infrastructure additions (no sidecars, no service mesh, no CNI replacement).
@@ -60,6 +85,67 @@ the controller emits a deny-all-egress policy rather than a permissive no-op. DN
 
 **Transient DNS safety:** a resolution failure retains the last known-good IPs for that host rather
 than revoking access. The `Degraded` status condition is set while this fallback is active.
+
+---
+
+## kubectl plugin
+
+`kubectl fqdn-policy` lets you inspect what a policy will do before applying it.
+
+### Install
+
+```bash
+make kubectl-plugin
+cp bin/kubectl-fqdn_policy /usr/local/bin/
+```
+
+### preview — resolve without touching the cluster
+
+```bash
+kubectl fqdn-policy preview policy.yaml
+```
+
+```
+Policy:    allow-payment-apis
+Namespace: payments
+
+api.stripe.com
+  A:     3.18.12.10, 3.18.12.11
+  AAAA:  2600:1f18:2148:bc01::a
+  TTL:   38s
+  CNAME: (none)
+  Resolver divergence: 4 IPs across 4 resolvers
+
+Generated NetworkPolicy would allow:
+  3.18.12.10/32:443/TCP
+  3.18.12.11/32:443/TCP
+  2600:1f18:2148:bc01::a/128:443/TCP
+
+Warnings:
+  [WARN] api.stripe.com: resolver divergence (4 IPs appeared in fewer than all resolvers)
+```
+
+Flags:
+- `--coredns-address <host:port>` — query cluster CoreDNS instead of public resolvers
+- `--no-multi-resolver` — use the system resolver only
+
+### diff — compare cluster state against fresh resolution
+
+```bash
+kubectl fqdn-policy diff payments/allow-payment-apis
+# or
+kubectl fqdn-policy diff allow-payment-apis -n payments
+```
+
+```
+Policy: allow-payment-apis (namespace: payments)
+
+api.stripe.com
+  + 54.160.0.1/32  (new)
+  - 3.18.12.11/32  (stale)
+```
+
+Warnings shown for: private / loopback / link-local IPs, resolver divergence, CNAME chain depth > 3.
 
 ---
 
@@ -407,6 +493,7 @@ internal/metrics/
   metrics.go                           15 Prometheus metrics
 
 cmd/main.go                            Manager setup, flag parsing, resolver wiring
+cmd/kubectl-fqdn_policy/main.go        kubectl plugin: preview + diff subcommands
 
 charts/fqdn-network-policy/            Helm chart
 config/
