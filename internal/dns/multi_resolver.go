@@ -153,7 +153,7 @@ func queryUpstream(c *mdns.Client, hostname, upstream string, qtype uint16) ([]s
 	if err != nil || resp == nil {
 		return nil, nil, 0, false, err
 	}
-	adBit := resp.MsgHdr.AuthenticatedData
+	adBit := resp.AuthenticatedData
 	if resp.Rcode == mdns.RcodeNameError {
 		return nil, nil, ttlCeiling, false, nil
 	}
