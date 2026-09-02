@@ -157,7 +157,7 @@ func TestQueryUpstream_IPv4(t *testing.T) {
 	defer stop()
 
 	c := &mdns.Client{Net: "udp", Timeout: 3 * time.Second}
-	ips, _, ttl, err := queryUpstream(c, "api.example.com", addr, mdns.TypeA)
+	ips, _, ttl, _, err := queryUpstream(c, "api.example.com", addr, mdns.TypeA)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"1.2.3.4"}, ips)
 	assert.Greater(t, ttl, time.Duration(0))
@@ -170,7 +170,7 @@ func TestQueryUpstream_IPv6(t *testing.T) {
 	defer stop()
 
 	c := &mdns.Client{Net: "udp", Timeout: 3 * time.Second}
-	ips, _, _, err := queryUpstream(c, "api.example.com", addr, mdns.TypeAAAA)
+	ips, _, _, _, err := queryUpstream(c, "api.example.com", addr, mdns.TypeAAAA)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"2001:db8::1"}, ips)
 }
@@ -180,7 +180,7 @@ func TestQueryUpstream_NXDOMAIN(t *testing.T) {
 	defer stop()
 
 	c := &mdns.Client{Net: "udp", Timeout: 3 * time.Second}
-	ips, _, _, err := queryUpstream(c, "unknown.example.com", addr, mdns.TypeA)
+	ips, _, _, _, err := queryUpstream(c, "unknown.example.com", addr, mdns.TypeA)
 	require.NoError(t, err)
 	assert.Empty(t, ips)
 }
@@ -397,7 +397,7 @@ func TestQueryUpstream_CNAMEChain(t *testing.T) {
 	defer func() { _ = srv.Shutdown() }()
 
 	c := &mdns.Client{Net: "udp", Timeout: 3 * time.Second}
-	ips, chain, _, err := queryUpstream(c, "api.example.com", pc.LocalAddr().String(), mdns.TypeA)
+	ips, chain, _, _, err := queryUpstream(c, "api.example.com", pc.LocalAddr().String(), mdns.TypeA)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"1.2.3.4"}, ips)
 	assert.Equal(t, []string{"foo.cdn.com", "edge.net"}, chain)

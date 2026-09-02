@@ -32,6 +32,11 @@ type Resolution struct {
 	// TTL is the clamped minimum TTL across all returned records.
 	// Zero means "use the default poll interval".
 	TTL time.Duration
+	// DNSSECValidated is true when the upstream resolver set the AD bit.
+	DNSSECValidated bool
+	// ResolverDivergence is the count of IPs that appeared in fewer than
+	// all resolvers queried. Always 0 for single-resolver results.
+	ResolverDivergence int
 }
 
 // Resolver is implemented by every resolution strategy.

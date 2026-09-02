@@ -63,6 +63,8 @@ func (m *MultiResolver) Resolve(ctx context.Context, hostname string) (Resolutio
 		ips        []string
 		cnameChain []string
 		ttl        time.Duration
+		dnssec     bool
+		upstream   string
 	}
 
 	ch := make(chan result, len(m.upstreams)*2)
@@ -73,11 +75,11 @@ func (m *MultiResolver) Resolve(ctx context.Context, hostname string) (Resolutio
 			wg.Add(1)
 			go func(ups string, qt uint16) {
 				defer wg.Done()
-				ips, chain, ttl, err := queryUpstream(m.client, hostname, ups, qt)
+				ips, chain, ttl, adBit, err := queryUpstream(m.client, hostname, ups, qt)
 				if err != nil || len(ips) == 0 {
 					return
 				}
-				ch <- result{ips: ips, cnameChain: chain, ttl: ttl}
+				ch <- result{ips: ips, cnameChain: chain, ttl: ttl, dnssec: adBit, upstream: ups}
 			}(upstream, qtype)
 		}
 	}
@@ -88,11 +90,20 @@ func (m *MultiResolver) Resolve(ctx context.Context, hostname string) (Resolutio
 	}()
 
 	ipSet := make(map[string]struct{})
+	upstreamIPs := make(map[string]map[string]struct{})
+	dnssecValidated := false
 	var cnameChain []string
 	minTTL := ttlCeiling
 	for r := range ch {
 		for _, ip := range r.ips {
 			ipSet[ip] = struct{}{}
+			if upstreamIPs[r.upstream] == nil {
+				upstreamIPs[r.upstream] = make(map[string]struct{})
+			}
+			upstreamIPs[r.upstream][ip] = struct{}{}
+		}
+		if r.dnssec {
+			dnssecValidated = true
 		}
 		if r.ttl > 0 && r.ttl < minTTL {
 			minTTL = r.ttl
@@ -107,6 +118,21 @@ func (m *MultiResolver) Resolve(ctx context.Context, hostname string) (Resolutio
 		return m.fallback.Resolve(ctx, hostname)
 	}
 
+	// Compute divergence: count IPs present in fewer than all responding upstreams.
+	totalUpstreams := len(upstreamIPs)
+	divergence := 0
+	for ip := range ipSet {
+		count := 0
+		for _, uips := range upstreamIPs {
+			if _, ok := uips[ip]; ok {
+				count++
+			}
+		}
+		if count < totalUpstreams {
+			divergence++
+		}
+	}
+
 	ips := make([]string, 0, len(ipSet))
 	for ip := range ipSet {
 		ips = append(ips, ip)
@@ -115,23 +141,24 @@ func (m *MultiResolver) Resolve(ctx context.Context, hostname string) (Resolutio
 	ttl := clampTTL(minTTL)
 	m.cache.Record(hostname, ips, ttl)
 
-	return Resolution{Hostname: hostname, IPs: ips, CNAMEChain: cnameChain, TTL: ttl}, nil
+	return Resolution{Hostname: hostname, IPs: ips, CNAMEChain: cnameChain, TTL: ttl, DNSSECValidated: dnssecValidated, ResolverDivergence: divergence}, nil
 }
 
-func queryUpstream(c *mdns.Client, hostname, upstream string, qtype uint16) ([]string, []string, time.Duration, error) {
+func queryUpstream(c *mdns.Client, hostname, upstream string, qtype uint16) ([]string, []string, time.Duration, bool, error) {
 	msg := new(mdns.Msg)
 	msg.SetQuestion(mdns.Fqdn(hostname), qtype)
 	msg.RecursionDesired = true
 
 	resp, _, err := c.Exchange(msg, upstream)
 	if err != nil || resp == nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, false, err
 	}
+	adBit := resp.MsgHdr.AuthenticatedData
 	if resp.Rcode == mdns.RcodeNameError {
-		return nil, nil, ttlCeiling, nil
+		return nil, nil, ttlCeiling, false, nil
 	}
 	if resp.Rcode != mdns.RcodeSuccess {
-		return nil, nil, 0, nil
+		return nil, nil, 0, false, nil
 	}
 
 	var ips []string
@@ -153,7 +180,7 @@ func queryUpstream(c *mdns.Client, hostname, upstream string, qtype uint16) ([]s
 			}
 		}
 	}
-	return ips, cnameChain, time.Duration(minTTL) * time.Second, nil
+	return ips, cnameChain, time.Duration(minTTL) * time.Second, adBit, nil
 }
 
 func uniqueStrings(in []string) []string {
@@ -182,7 +209,7 @@ func (m *MultiResolver) ResolvePerUpstream(_ context.Context, hostname string) [
 	for _, ups := range m.upstreams {
 		var ips []string
 		for _, qt := range []uint16{mdns.TypeA, mdns.TypeAAAA} {
-			got, _, _, _ := queryUpstream(m.client, hostname, ups, qt)
+			got, _, _, _, _ := queryUpstream(m.client, hostname, ups, qt)
 			ips = append(ips, got...)
 		}
 		if len(ips) > 0 {

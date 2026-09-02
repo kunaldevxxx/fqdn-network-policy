@@ -123,11 +123,14 @@ func main() {
 	}
 
 	// ── FQDNNetworkPolicy controller ───────────────────────────────────────
+	churnTracker := idns.NewChurnTracker()
+
 	if err := (&controller.FQDNNetworkPolicyReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Resolver: resolver,
-		Recorder: mgr.GetEventRecorderFor("fqdn-network-policy"), //nolint:staticcheck
+		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
+		Resolver:     resolver,
+		Recorder:     mgr.GetEventRecorderFor("fqdn-network-policy"), //nolint:staticcheck
+		ChurnTracker: churnTracker,
 	}).SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to create controller", "controller", "FQDNNetworkPolicy")
 		os.Exit(1)
@@ -135,10 +138,11 @@ func main() {
 
 	// ── ClusterFQDNNetworkPolicy controller ────────────────────────────────
 	if err := (&controller.ClusterFQDNNetworkPolicyReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Resolver: resolver,
-		Recorder: mgr.GetEventRecorderFor("cluster-fqdn-network-policy"), //nolint:staticcheck
+		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
+		Resolver:     resolver,
+		Recorder:     mgr.GetEventRecorderFor("cluster-fqdn-network-policy"), //nolint:staticcheck
+		ChurnTracker: churnTracker,
 	}).SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to create controller", "controller", "ClusterFQDNNetworkPolicy")
 		os.Exit(1)

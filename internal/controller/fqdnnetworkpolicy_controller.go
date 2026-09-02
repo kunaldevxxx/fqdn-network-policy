@@ -28,14 +28,16 @@ const (
 	defaultPollInterval = 60 * time.Second
 	ttlFloor            = 5 * time.Second
 	ttlCeiling          = 300 * time.Second
+	shortTTLThreshold   = 10 * time.Second
 )
 
 // FQDNNetworkPolicyReconciler reconciles a FQDNNetworkPolicy object.
 type FQDNNetworkPolicyReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Resolver dns.Resolver
-	Recorder record.EventRecorder
+	Scheme       *runtime.Scheme
+	Resolver     dns.Resolver
+	Recorder     record.EventRecorder
+	ChurnTracker *dns.ChurnTracker
 }
 
 // +kubebuilder:rbac:groups=netsec.kunal.dev,resources=fqdnnetworkpolicies,verbs=get;list;watch;create;update;patch;delete
@@ -109,6 +111,16 @@ func (r *FQDNNetworkPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 		metrics.ResolvedIPsCount.WithLabelValues(rule.Match).Set(float64(len(allowedIPs)))
 
+		churnRate := 0
+		if r.ChurnTracker != nil {
+			churnRate = r.ChurnTracker.Record(rule.Match, allowedIPs)
+		}
+		sec := &netv1alpha1.DNSSecurityMetadata{
+			DNSSECValidated:    res.DNSSECValidated,
+			IPChurnRate:        churnRate,
+			ResolverDivergence: res.ResolverDivergence,
+			ShortTTL:           res.TTL > 0 && res.TTL < shortTTLThreshold,
+		}
 		resolved = append(resolved, netv1alpha1.ResolvedHost{
 			Hostname:   rule.Match,
 			IPs:        allowedIPs,
@@ -116,6 +128,7 @@ func (r *FQDNNetworkPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			LastSeen:   metav1.Now(),
 			Source:     "active-lookup",
 			TTLSeconds: int32(ttl.Seconds()),
+			Security:   sec,
 		})
 
 		if fp.Spec.Security != nil && fp.Spec.Security.MaxCNAMEDepth != nil {

@@ -211,17 +211,26 @@ func runPreview(cmd *cobra.Command, args []string) error {
 	}
 	if np, err := netpol.Build(synthetic); err == nil && len(np.Spec.Egress) > 0 {
 		fmt.Println("Generated NetworkPolicy would allow:")
+		seen := make(map[string]struct{})
 		for _, egressRule := range np.Spec.Egress {
 			for _, peer := range egressRule.To {
 				if peer.IPBlock == nil {
 					continue
 				}
 				if len(egressRule.Ports) == 0 {
-					fmt.Printf("  %s (all ports)\n", peer.IPBlock.CIDR)
+					key := peer.IPBlock.CIDR
+					if _, ok := seen[key]; !ok {
+						seen[key] = struct{}{}
+						fmt.Printf("  %s (all ports)\n", peer.IPBlock.CIDR)
+					}
 					continue
 				}
 				for _, p := range egressRule.Ports {
-					fmt.Printf("  %s:%v/%s\n", peer.IPBlock.CIDR, p.Port, *p.Protocol)
+					key := fmt.Sprintf("%s:%v/%s", peer.IPBlock.CIDR, p.Port, *p.Protocol)
+					if _, ok := seen[key]; !ok {
+						seen[key] = struct{}{}
+						fmt.Printf("  %s\n", key)
+					}
 				}
 			}
 		}
