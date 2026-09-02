@@ -204,6 +204,21 @@ func (in *PolicyPort) DeepCopy() *PolicyPort {
 }
 
 // DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
+func (in *DNSSecurityMetadata) DeepCopyInto(out *DNSSecurityMetadata) {
+	*out = *in
+}
+
+// DeepCopy is a deepcopy function, copying the receiver, creating a new DNSSecurityMetadata.
+func (in *DNSSecurityMetadata) DeepCopy() *DNSSecurityMetadata {
+	if in == nil {
+		return nil
+	}
+	out := new(DNSSecurityMetadata)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
 func (in *ResolvedHost) DeepCopyInto(out *ResolvedHost) {
 	*out = *in
 	if in.IPs != nil {
@@ -217,6 +232,11 @@ func (in *ResolvedHost) DeepCopyInto(out *ResolvedHost) {
 		copy(*out, *in)
 	}
 	in.LastSeen.DeepCopyInto(&out.LastSeen)
+	if in.Security != nil {
+		in, out := &in.Security, &out.Security
+		*out = new(DNSSecurityMetadata)
+		**out = **in
+	}
 }
 
 // DeepCopy is a deepcopy function, copying the receiver, creating a new ResolvedHost.

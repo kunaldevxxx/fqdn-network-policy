@@ -30,9 +30,10 @@ import (
 // that matches the policy's NamespaceSelector, keeping them in sync.
 type ClusterFQDNNetworkPolicyReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Resolver dns.Resolver
-	Recorder record.EventRecorder
+	Scheme       *runtime.Scheme
+	Resolver     dns.Resolver
+	Recorder     record.EventRecorder
+	ChurnTracker *dns.ChurnTracker
 }
 
 // +kubebuilder:rbac:groups=netsec.kunal.dev,resources=clusterfqdnnetworkpolicies,verbs=get;list;watch;create;update;patch;delete
@@ -93,6 +94,16 @@ func (r *ClusterFQDNNetworkPolicyReconciler) Reconcile(ctx context.Context, req 
 		}
 
 		metrics.ResolvedIPsCount.WithLabelValues(rule.Match).Set(float64(len(allowedIPs)))
+		churnRate := 0
+		if r.ChurnTracker != nil {
+			churnRate = r.ChurnTracker.Record(rule.Match, allowedIPs)
+		}
+		sec := &netv1alpha1.DNSSecurityMetadata{
+			DNSSECValidated:    res.DNSSECValidated,
+			IPChurnRate:        churnRate,
+			ResolverDivergence: res.ResolverDivergence,
+			ShortTTL:           res.TTL > 0 && res.TTL < shortTTLThreshold,
+		}
 		resolved = append(resolved, netv1alpha1.ResolvedHost{
 			Hostname:   rule.Match,
 			IPs:        allowedIPs,
@@ -100,6 +111,7 @@ func (r *ClusterFQDNNetworkPolicyReconciler) Reconcile(ctx context.Context, req 
 			LastSeen:   metav1.Now(),
 			Source:     "active-lookup",
 			TTLSeconds: int32(ttl.Seconds()),
+			Security:   sec,
 		})
 
 		if cp.Spec.Security != nil && cp.Spec.Security.MaxCNAMEDepth != nil {

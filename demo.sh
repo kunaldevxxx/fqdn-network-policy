@@ -47,6 +47,7 @@ kind load docker-image "$IMAGE_TAG" --name "$CLUSTER_NAME"
 section "5. Deploy the controller"
 kubectl apply -f config/manager/deployment.yaml
 kubectl apply -f config/rbac/role.yaml
+kubectl apply -f config/rbac/role_binding.yaml
 kubectl -n fqdn-network-policy-system rollout status deployment/fqdn-network-policy-controller --timeout=120s
 
 section "6. Create the target namespace and a test pod"

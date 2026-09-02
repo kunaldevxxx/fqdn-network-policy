@@ -20,11 +20,11 @@ spec:
     - jsonPath: .spec.mode
       name: Mode
       type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
     - jsonPath: .status.affectedNamespaces
       name: Namespaces
-      type: string
-    - jsonPath: .status.conditions[?(@.type=='Ready')].status
-      name: Ready
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -33,31 +33,36 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          ClusterFQDNNetworkPolicy enforces FQDN-based egress rules across all namespaces
-          matching a selector. The controller creates one NetworkPolicy per matched namespace
-          and garbage-collects it if the namespace no longer matches.
+          ClusterFQDNNetworkPolicy enforces FQDN-based egress rules cluster-wide,
+          generating per-namespace NetworkPolicy objects in all matched namespaces.
         properties:
           apiVersion:
             description: |-
               APIVersion defines the versioned schema of this representation of an object.
               Servers should convert recognized schemas to the latest internal value, and
               may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
             type: string
           kind:
             description: |-
               Kind is a string value representing the REST resource this object represents.
               Servers may infer this from the endpoint the client submits requests to.
-              Cannot be updated. In CamelCase.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
             type: string
           metadata:
             type: object
           spec:
-            description: ClusterFQDNNetworkPolicySpec defines the desired state.
+            description: |-
+              ClusterFQDNNetworkPolicySpec defines cluster-wide FQDN egress rules.
+              Platform teams use this to enforce baseline egress restrictions (e.g.
+              telemetry, auth providers) across all or selected namespaces without
+              duplicating FQDNNetworkPolicy in every namespace.
             properties:
               coreDNSAddress:
-                description: |-
-                  CoreDNSAddress is the host:port of the cluster DNS server to query directly
-                  (e.g. "10.96.0.10:53").
+                description: CoreDNSAddress is the host:port of the cluster DNS server
+                  to query directly.
                 type: string
               egress:
                 description: Egress is the list of allowed external FQDNs.
@@ -65,13 +70,21 @@ spec:
                   description: FQDNRule describes one allowed external destination.
                   properties:
                     match:
-                      description: Match is a hostname or wildcard pattern.
+                      description: |-
+                        Match is a fully qualified domain name, e.g. "api.stripe.com".
+                        Wildcard patterns (*.foo.com) are accepted only when the snoop resolver
+                        is active; a validation webhook rejects wildcards otherwise.
+                      maxLength: 253
                       minLength: 1
                       type: string
                     ports:
-                      description: Ports restricts the rule to specific destination ports/protocols.
+                      description: |-
+                        Ports restricts the rule to specific destination ports/protocols.
+                        Empty means all ports. Specifying explicit ports is strongly recommended
+                        to avoid opening attack vectors on unintended port numbers.
                       items:
-                        description: PolicyPort mirrors networkingv1.NetworkPolicyPort.
+                        description: PolicyPort mirrors networkingv1.NetworkPolicyPort
+                          to avoid import coupling.
                         properties:
                           port:
                             description: Port is the destination port number (1-65535).
@@ -81,7 +94,8 @@ spec:
                             type: integer
                           protocol:
                             default: TCP
-                            description: Protocol is TCP, UDP, or SCTP.
+                            description: Protocol is TCP, UDP, or SCTP. Defaults to
+                              TCP.
                             enum:
                             - TCP
                             - UDP
@@ -99,30 +113,40 @@ spec:
               mode:
                 default: Enforce
                 description: |-
-                  Mode controls whether the controller writes NetworkPolicies (Enforce)
-                  or only logs resolved IPs (Audit). Defaults to Enforce.
+                  Mode controls enforcement. "Enforce" writes NetworkPolicy objects into
+                  each matched namespace. "Audit" logs only.
                 enum:
                 - Enforce
                 - Audit
                 type: string
               namespaceSelector:
                 description: |-
-                  NamespaceSelector selects the namespaces this policy applies to.
-                  An empty selector targets all namespaces.
+                  NamespaceSelector selects which namespaces this policy applies to.
+                  An empty selector means all namespaces.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
                     items:
-                      description: A label selector requirement.
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
                       properties:
                         key:
-                          description: key is the label key that the selector applies to.
+                          description: key is the label key that the selector applies
+                            to.
                           type: string
                         operator:
-                          description: operator represents a key's relationship to a set of values.
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
                           type: string
                         values:
-                          description: values is an array of string values.
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
                           items:
                             type: string
                           type: array
@@ -136,31 +160,46 @@ spec:
                   matchLabels:
                     additionalProperties:
                       type: string
-                    description: matchLabels is a map of {key,value} pairs.
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
               podSelector:
-                description: PodSelector targets which pods in the matched namespaces the rules apply to.
+                description: |-
+                  PodSelector targets which pods within matched namespaces this policy applies to.
+                  An empty selector means all pods.
                 properties:
                   podSelector:
                     description: |-
-                      PodSelector selects the pods this policy applies to.
-                      Empty selector means "all pods".
+                      PodSelector selects the pods this policy applies to within the namespace.
+                      Empty selector means "all pods in the namespace".
                     properties:
                       matchExpressions:
-                        description: matchExpressions is a list of label selector requirements.
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
                         items:
-                          description: A label selector requirement.
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
                           properties:
                             key:
-                              description: key is the label key that the selector applies to.
+                              description: key is the label key that the selector
+                                applies to.
                               type: string
                             operator:
-                              description: operator represents a key's relationship to a set of values.
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
                               type: string
                             values:
-                              description: values is an array of string values.
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
                               items:
                                 type: string
                               type: array
@@ -174,49 +213,96 @@ spec:
                       matchLabels:
                         additionalProperties:
                           type: string
-                        description: matchLabels is a map of {key,value} pairs.
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
                         type: object
                     type: object
                     x-kubernetes-map-type: atomic
                 type: object
               resolutionTTLOverride:
-                description: ResolutionTTLOverride forces a re-resolution interval in seconds (5-300).
+                description: ResolutionTTLOverride forces a re-resolution interval
+                  in seconds.
                 format: int32
                 maximum: 300
                 minimum: 5
                 type: integer
+              security:
+                description: Security defines security-related constraints on FQDN
+                  resolution.
+                properties:
+                  blockLinkLocal:
+                    description: |-
+                      BlockLinkLocal drops link-local addresses (169.254.0.0/16, fe80::/10)
+                      from the resolved allow-list. Defaults to true.
+                    type: boolean
+                  blockLoopback:
+                    description: |-
+                      BlockLoopback drops loopback addresses (127.0.0.0/8, ::1/128) from the
+                      resolved allow-list. Defaults to true.
+                    type: boolean
+                  blockPrivateIPs:
+                    description: |-
+                      BlockPrivateIPs drops RFC1918 (10/8, 172.16/12, 192.168/16) and CGNAT
+                      (100.64/10) addresses from the resolved allow-list and raises a Degraded
+                      condition. Defaults to true; set to false only in split-horizon DNS
+                      environments where private egress is intentional.
+                    type: boolean
+                  maxCNAMEDepth:
+                    description: |-
+                      MaxCNAMEDepth is the maximum allowed CNAME chain length before the
+                      controller raises a Degraded condition. 0 or unset means no limit.
+                    format: int32
+                    maximum: 10
+                    minimum: 0
+                    type: integer
+                type: object
             required:
             - egress
-            - podSelector
             type: object
           status:
             description: ClusterFQDNNetworkPolicyStatus defines the observed state.
             properties:
               affectedNamespaces:
-                description: AffectedNamespaces lists the namespaces currently receiving a NetworkPolicy from this resource.
+                description: AffectedNamespaces lists the namespaces where NetworkPolicy
+                  objects were generated.
                 items:
                   type: string
                 type: array
               conditions:
                 description: Conditions follow the standard metav1.Condition pattern.
                 items:
-                  description: Condition contains details for one aspect of the current state.
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
                   properties:
                     lastTransitionTime:
-                      description: lastTransitionTime is the last time the condition transitioned.
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
                       format: date-time
                       type: string
                     message:
-                      description: message is a human readable message indicating details.
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
                       maxLength: 32768
                       type: string
                     observedGeneration:
-                      description: observedGeneration represents the .metadata.generation the condition was set upon.
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
                       format: int64
                       minimum: 0
                       type: integer
                     reason:
-                      description: reason contains a programmatic identifier for the condition's last transition.
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
                       maxLength: 1024
                       minLength: 1
                       pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
@@ -229,7 +315,7 @@ spec:
                       - Unknown
                       type: string
                     type:
-                      description: type of condition in CamelCase.
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
                       maxLength: 316
                       pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
                       type: string
@@ -248,8 +334,16 @@ spec:
               resolvedHosts:
                 description: ResolvedHosts is the current resolution cache.
                 items:
-                  description: ResolvedHost records the last known IPs for one matched hostname.
+                  description: ResolvedHost records the last known IPs for one matched
+                    hostname.
                   properties:
+                    cnameChain:
+                      description: |-
+                        CNAMEChain holds the ordered CNAME targets from the queried hostname to
+                        the final canonical name. Empty when the name resolved without CNAME indirection.
+                      items:
+                        type: string
+                      type: array
                     hostname:
                       type: string
                     ips:
@@ -259,9 +353,43 @@ spec:
                     lastSeen:
                       format: date-time
                       type: string
+                    security:
+                      description: |-
+                        Security holds optional DNS security metadata for this hostname.
+                        Absent when the snoop resolver is the resolution source.
+                      properties:
+                        dnssecValidated:
+                          description: |-
+                            DNSSECValidated is true when at least one upstream resolver set the
+                            Authenticated Data (AD) bit, indicating the answer was DNSSEC-signed.
+                            This reflects the upstream resolver's validation, not an independent chain check.
+                          type: boolean
+                        ipChurnRate:
+                          description: |-
+                            IPChurnRate is the count of distinct IPs observed for this hostname
+                            across the last 10 resolution cycles. Values above 4 typically indicate
+                            CDN anycast or short-TTL load balancing.
+                          type: integer
+                        resolverDivergence:
+                          description: |-
+                            ResolverDivergence is the number of IPs that appeared in fewer than
+                            all resolvers queried. Zero means full agreement across resolvers.
+                          type: integer
+                        shortTTL:
+                          description: |-
+                            ShortTTL is true when the observed TTL is below the configured minimum
+                            (default 10 s). Short TTLs combined with high IPChurnRate are a common
+                            indicator of fast-flux DNS.
+                          type: boolean
+                      type: object
                     source:
+                      description: |-
+                        Source is "dns-snoop" when the eBPF resolver observed the answer, or
+                        "active-lookup" when the controller queried DNS directly.
                       type: string
                     ttlSeconds:
+                      description: TTLSeconds is the DNS TTL of the last response,
+                        in seconds.
                       format: int32
                       type: integer
                   required:

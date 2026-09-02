@@ -32,7 +32,6 @@ type FQDNRule struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:XValidation:rule="self.matches('^(\\\\*\\\\.)?([a-zA-Z0-9]([a-zA-Z0-9\\\\-]{0,61}[a-zA-Z0-9])?\\\\.)+[a-zA-Z]{2,}$')",message="Must be a valid FQDN or wildcard FQDN (*.example.com)."
 	Match string `json:"match"`
 
 	// Ports restricts the rule to specific destination ports/protocols.
@@ -54,6 +53,33 @@ type PolicyPort struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
 	Port int32 `json:"port"`
+}
+
+// DNSSecurityMetadata holds DNS health and security indicators for a resolved hostname.
+// All fields are optional and populated only when the active or multi resolver is used.
+type DNSSecurityMetadata struct {
+	// DNSSECValidated is true when at least one upstream resolver set the
+	// Authenticated Data (AD) bit, indicating the answer was DNSSEC-signed.
+	// This reflects the upstream resolver's validation, not an independent chain check.
+	// +optional
+	DNSSECValidated bool `json:"dnssecValidated,omitempty"`
+
+	// IPChurnRate is the count of distinct IPs observed for this hostname
+	// across the last 10 resolution cycles. Values above 4 typically indicate
+	// CDN anycast or short-TTL load balancing.
+	// +optional
+	IPChurnRate int `json:"ipChurnRate,omitempty"`
+
+	// ResolverDivergence is the number of IPs that appeared in fewer than
+	// all resolvers queried. Zero means full agreement across resolvers.
+	// +optional
+	ResolverDivergence int `json:"resolverDivergence,omitempty"`
+
+	// ShortTTL is true when the observed TTL is below the configured minimum
+	// (default 10 s). Short TTLs combined with high IPChurnRate are a common
+	// indicator of fast-flux DNS.
+	// +optional
+	ShortTTL bool `json:"shortTTL,omitempty"`
 }
 
 // FQDNNetworkPolicySpec defines the desired state.
@@ -133,6 +159,10 @@ type ResolvedHost struct {
 	// the final canonical name. Empty when the name resolved without CNAME indirection.
 	// +optional
 	CNAMEChain []string `json:"cnameChain,omitempty"`
+	// Security holds optional DNS security metadata for this hostname.
+	// Absent when the snoop resolver is the resolution source.
+	// +optional
+	Security *DNSSecurityMetadata `json:"security,omitempty"`
 }
 
 // FQDNNetworkPolicyStatus defines the observed state.
