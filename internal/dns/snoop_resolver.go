@@ -41,12 +41,13 @@ const (
 // intercepts queries, records all A/AAAA answers into IPCache, and
 // forwards each query to the real upstream.
 type SnoopResolver struct {
-	cache    *IPCache
-	upstream string
-	server   *mdns.Server
-	multi    *MultiResolver // fallback for Resolve() on cache miss
-	mu       sync.RWMutex
-	ready    bool
+	cache        *IPCache
+	observations *ObservationStore
+	upstream     string
+	server       *mdns.Server
+	multi        *MultiResolver // fallback for Resolve() on cache miss
+	mu           sync.RWMutex
+	ready        bool
 }
 
 // NewSnoopResolver creates a SnoopResolver that listens on listenAddr
@@ -60,9 +61,10 @@ func NewSnoopResolver(listenAddr, upstream string) *SnoopResolver {
 		upstream = systemNameserver()
 	}
 	sr := &SnoopResolver{
-		cache:    NewIPCache(),
-		upstream: upstream,
-		multi:    NewMultiResolver([]string{upstream}),
+		cache:        NewIPCache(),
+		observations: NewObservationStore(),
+		upstream:     upstream,
+		multi:        NewMultiResolver([]string{upstream}),
 	}
 	mux := mdns.NewServeMux()
 	mux.HandleFunc(".", sr.handleQuery)
@@ -108,6 +110,12 @@ func (s *SnoopResolver) Start(ctx context.Context) error {
 // Shutdown stops the DNS proxy server gracefully.
 func (s *SnoopResolver) Shutdown() {
 	_ = s.server.Shutdown()
+}
+
+// Observations returns the store of cluster-wide hostname observations,
+// used by the FQDNEgressObservation controller to discover egress domains.
+func (s *SnoopResolver) Observations() *ObservationStore {
+	return s.observations
 }
 
 // Resolve implements dns.Resolver. It returns the union of IPs this proxy
@@ -158,6 +166,20 @@ func (s *SnoopResolver) handleQuery(w mdns.ResponseWriter, req *mdns.Msg) {
 		// Trim trailing dot for consistency with the rest of the controller.
 		if len(hostname) > 0 && hostname[len(hostname)-1] == '.' {
 			hostname = hostname[:len(hostname)-1]
+		}
+
+		// Record the query itself (attempted egress) regardless of whether
+		// it resolved -- this is what backs FQDNEgressObservation. Note this
+		// is cluster-wide, not per-pod: see ObservationStore's doc comment
+		// for why the original requesting pod can't be attributed here.
+		//
+		// Restricted to A/AAAA: this is the only record type the rest of
+		// this package resolves or acts on, and it also filters out CoreDNS's
+		// own loop-detection probes, which use HINFO queries against random
+		// hostnames (see plugin/loop in coredns/coredns) and would otherwise
+		// show up as bogus "observed domains".
+		if q.Qtype == mdns.TypeA || q.Qtype == mdns.TypeAAAA {
+			s.observations.Record(hostname)
 		}
 
 		var ips []string

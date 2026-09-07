@@ -293,13 +293,14 @@ exactly which IPs pods received in its response stream.
    ```bash
    --enable-snoop-resolver=true
    --snoop-listen-address=0.0.0.0:5353
-   --snoop-upstream=<coredns-cluster-ip>:53
+   --snoop-upstream=<a real upstream, e.g. 8.8.8.8:53>   # never point this back at CoreDNS
    ```
 
-2. Patch your CoreDNS ConfigMap to forward through the snoop proxy:
+2. Patch your CoreDNS ConfigMap to forward through the snoop proxy. `forward` only accepts an
+   IP address (or `/etc/resolv.conf`), not a Service DNS name — use the snoop Service's ClusterIP:
    ```
    .:53 {
-       forward . <controller-pod-ip>:5353
+       forward . <snoop-service-cluster-ip>:5353
        cache 30
        reload
    }
@@ -307,6 +308,9 @@ exactly which IPs pods received in its response stream.
 
 3. Wildcard rules (e.g. `*.s3.amazonaws.com`) are now accepted by the admission webhook
    and dynamically expanded as the proxy observes new subdomains from pod traffic.
+
+4. The snoop resolver is also what backs [`FQDNEgressObservation`](#discovering-egress-domains-fqdnegressobservation)
+   below — but note its cluster-wide (not per-pod) limitation before relying on it for discovery.
 
 ### MultiResolver (default, recommended)
 
@@ -322,6 +326,96 @@ multiResolver:
 coreDNS:
   address: "10.96.0.10:53"   # also queries cluster CoreDNS when set
 ```
+
+---
+
+## ASN/org enrichment (opt-in)
+
+Annotate resolved IPs with autonomous-system and organization data, so an operator can tell at a
+glance whether `api.stripe.com` resolving to an unfamiliar IP is a new CDN edge (expected) or an
+unrelated hosting provider (suspicious). Disabled by default — no external calls unless configured.
+
+```bash
+--asn-enricher=ipinfo      # or FQDNNP_ASN_ENRICHER=ipinfo
+--ipinfo-token=<token>     # optional, or FQDNNP_IPINFO_TOKEN; raises ipinfo.io rate limits
+```
+
+When enabled, each resolved IP is looked up against [ipinfo.io](https://ipinfo.io) asynchronously —
+enrichment never blocks policy reconciliation. Results are cached for 6 hours per IP (also the
+enrichment rate limit) and populate `status.resolvedHosts[].ipEnrichments`:
+
+```bash
+kubectl get fqdnnetworkpolicy allow-payment-apis -n payments \
+  -o jsonpath='{.status.resolvedHosts[0].ipEnrichments}' | jq
+```
+
+```json
+{
+  "54.160.0.1": {
+    "asn": "AS16509",
+    "org": "Amazon.com, Inc.",
+    "country": "US",
+    "enrichedAt": "2026-09-07T08:39:52Z"
+  }
+}
+```
+
+If an IP's ASN/org changes between enrichment cycles (e.g. a hostname moves to a different
+hosting provider), the controller logs a warning and increments `fqdnnp_asn_change_total`.
+Blocking policy application on an ASN change, and allowlisting by expected ASN, are both
+follow-on features — this only surfaces the data.
+
+---
+
+## Discovering egress domains: `FQDNEgressObservation`
+
+Writing an `FQDNNetworkPolicy` from scratch requires knowing what hostnames your application
+resolves. `FQDNEgressObservation` surfaces that passively from real DNS traffic, via the
+[SnoopResolver](#snoopresolver-setup) — no code changes, no guessing, no watching for connection
+failures after applying a policy.
+
+```yaml
+apiVersion: netsec.kunal.dev/v1alpha1
+kind: FQDNEgressObservation
+metadata:
+  name: checkout-observation
+  namespace: payments
+spec:
+  podSelector:
+    podSelector:
+      matchLabels:
+        app: checkout
+  observationWindow: 24h   # how long to accumulate before status.observationComplete is set
+```
+
+```bash
+kubectl get fqdnegressobservation checkout-observation -n payments \
+  -o jsonpath='{.status.observedDomains}' | jq
+```
+
+```json
+[
+  { "hostname": "api.stripe.com", "firstSeen": "2026-09-07T09:00:00Z", "lastSeen": "2026-09-07T14:22:00Z" },
+  { "hostname": "api.github.com", "firstSeen": "2026-09-07T09:01:00Z", "lastSeen": "2026-09-07T14:22:00Z" }
+]
+```
+
+**Important — this is cluster-wide, not per-pod.** `spec.podSelector` is accepted for forward
+compatibility but has no filtering effect today: CoreDNS's `forward` plugin re-originates every
+forwarded query as its own client, so the snoop proxy can never see which pod actually asked —
+only that a query happened, somewhere in the cluster. `status.observedDomains` reflects every
+hostname resolved cluster-wide, regardless of this object's namespace or `podSelector`. Real
+per-pod attribution would need either a custom CoreDNS build (the `edns0` plugin, which carries
+the real client as an EDNS Client-Subnet option, but isn't compiled into the standard
+`registry.k8s.io/coredns/coredns` image) or a different interception mechanism entirely
+(eBPF/iptables at the source pod) — both out of scope here.
+
+Requires `--enable-snoop-resolver=true` (see [SnoopResolver setup](#snoopresolver-setup)); the
+controller sets a `Degraded` condition when the snoop resolver isn't active. `observedDomains`
+accumulates additively across reconciles, so it survives controller restarts.
+
+**Out of scope:** auto-generating an `FQDNNetworkPolicy` from the observation, opening a Git PR —
+both are follow-on features that depend on this data being available.
 
 ---
 
@@ -346,6 +440,13 @@ All fields from `FQDNNetworkPolicy` plus:
 | Field | Type | Description |
 |-------|------|-------------|
 | `spec.namespaceSelector` | `LabelSelector` | Namespaces to target. Empty selects all namespaces. |
+
+### `FQDNEgressObservation`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `spec.podSelector.podSelector` | `LabelSelector` | — | Accepted for forward compatibility; not yet enforced — see [Discovering egress domains](#discovering-egress-domains-fqdnegressobservation). |
+| `spec.observationWindow` | duration | `24h` | How long to accumulate before `status.observationComplete` is set. |
 
 ---
 
@@ -375,7 +476,7 @@ Events are published for: `NetworkPolicyCreated`, `NetworkPolicyUpdated`, `Resol
 
 ### Prometheus metrics
 
-The controller exposes 15 metrics at `:8080/metrics`. Key metrics:
+The controller exposes 16 metrics at `:8080/metrics`. Key metrics:
 
 | Metric | Type | Description |
 |--------|------|-------------|
@@ -389,6 +490,7 @@ The controller exposes 15 metrics at `:8080/metrics`. Key metrics:
 | `fqdn_managed_policies_total` | Gauge | Active `FQDNNetworkPolicy` objects. |
 | `fqdn_cluster_managed_namespaces_total` | Gauge | Namespaces receiving policies from `ClusterFQDNNetworkPolicy`. |
 | `fqdn_reconcile_duration_seconds` | Histogram | End-to-end reconcile time per controller. |
+| `fqdnnp_asn_change_total` | Counter | ASN/org enrichment changes between cycles, by hostname/previous/current ASN (opt-in enricher only). |
 
 Enable a `ServiceMonitor` for prometheus-operator:
 ```yaml
@@ -468,6 +570,7 @@ in `kube-system` under the key `fqdn-network-policy.netsec.kunal.dev`.
 api/v1alpha1/
   fqdnnetworkpolicy_types.go           Namespaced CRD: FQDNNetworkPolicy
   clusterfqdnnetworkpolicy_types.go    Cluster-scoped CRD: ClusterFQDNNetworkPolicy
+  fqdnegressobservation_types.go       Namespaced CRD: FQDNEgressObservation (status-only)
   zz_generated.deepcopy.go            Generated — do not edit by hand
 
 internal/dns/
@@ -477,10 +580,18 @@ internal/dns/
   wildcard_resolver.go                 WildcardResolver: prefix expansion for *.foo.com
   ip_cache.go                          IPCache: thread-safe TTL-respecting IP store
   ttl_queue.go                         TTLQueue: min-heap for exact TTL scheduling
+  observation_store.go                 ObservationStore: cluster-wide hostname observations
+
+internal/enrich/
+  client.go                            IPInfoClient: ASN/org lookups against ipinfo.io
+  cache.go                             6h TTL cache (also the per-IP rate limit)
+  manager.go                           Manager: async worker pool, never blocks reconciliation
 
 internal/controller/
   fqdnnetworkpolicy_controller.go      Namespace-scoped reconcile loop
   clusterfqdnnetworkpolicy_controller.go  Cluster-scoped reconcile + fanout
+  fqdnegressobservation_controller.go  Cluster-wide DNS observation reconcile loop
+  enrichment.go                        Wires internal/enrich into ResolvedHost status
 
 internal/netpol/
   builder.go                           Converts resolved IPs → NetworkPolicy
@@ -490,7 +601,7 @@ internal/webhook/
   validate.go                          ValidatingAdmissionWebhook HTTP handler
 
 internal/metrics/
-  metrics.go                           15 Prometheus metrics
+  metrics.go                           16 Prometheus metrics
 
 cmd/main.go                            Manager setup, flag parsing, resolver wiring
 cmd/kubectl-fqdn_policy/main.go        kubectl plugin: preview + diff subcommands
@@ -499,7 +610,7 @@ charts/fqdn-network-policy/            Helm chart
 config/
   crd/bases/                           Generated CRD YAML
   rbac/role.yaml                       ClusterRole + ClusterRoleBinding
-  manager/deployment.yaml             Controller Deployment
+  manager/deployment.yaml             Controller Deployment + snoop proxy Service
   samples/                             Example CRs
 
 .github/workflows/ci.yml              CI: lint → unit → build → KinD E2E → helm lint
@@ -530,6 +641,8 @@ the generated output alongside any type changes.
 | No mTLS / SPIFFE identity-based policy | Use Istio or SPIRE alongside this controller for identity-based controls |
 | No multi-cluster federation | Each cluster runs its own controller; shared policy distribution is not yet implemented |
 | Webhook TLS requires cert-manager or manual cert provisioning | cert-manager integration is included in the Helm chart |
+| `FQDNEgressObservation` reports cluster-wide, not per-pod or per-namespace | Fundamental limitation of CoreDNS's `forward` plugin, not a bug — see [Discovering egress domains](#discovering-egress-domains-fqdnegressobservation) |
+| ASN enricher depends on ipinfo.io reachability and its rate limits | Opt-in and disabled by default; results are cached 6h per IP to stay within free-tier limits |
 
 ## License
 

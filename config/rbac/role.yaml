@@ -23,6 +23,7 @@ rules:
   - netsec.kunal.dev
   resources:
   - clusterfqdnnetworkpolicies
+  - fqdnegressobservations
   - fqdnnetworkpolicies
   verbs:
   - create
@@ -36,6 +37,7 @@ rules:
   - netsec.kunal.dev
   resources:
   - clusterfqdnnetworkpolicies/status
+  - fqdnegressobservations/status
   - fqdnnetworkpolicies/status
   verbs:
   - get
