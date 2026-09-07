@@ -79,7 +79,7 @@ func (c *IPInfoClient) Lookup(ctx context.Context, ip string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return Result{}, fmt.Errorf("ipinfo lookup for %s: unexpected status %d", ip, resp.StatusCode)
