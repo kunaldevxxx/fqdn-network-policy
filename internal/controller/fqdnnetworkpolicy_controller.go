@@ -10,6 +10,7 @@ import (
 
 	netv1alpha1 "github.com/kunaldevxxx/fqdn-network-policy/api/v1alpha1"
 	"github.com/kunaldevxxx/fqdn-network-policy/internal/dns"
+	"github.com/kunaldevxxx/fqdn-network-policy/internal/enrich"
 	"github.com/kunaldevxxx/fqdn-network-policy/internal/metrics"
 	"github.com/kunaldevxxx/fqdn-network-policy/internal/netpol"
 
@@ -38,6 +39,9 @@ type FQDNNetworkPolicyReconciler struct {
 	Resolver     dns.Resolver
 	Recorder     record.EventRecorder
 	ChurnTracker *dns.ChurnTracker
+	// Enricher is nil when the ASN enricher is not configured (default);
+	// the reconciler makes no external calls in that case.
+	Enricher *enrich.Manager
 }
 
 // +kubebuilder:rbac:groups=netsec.kunal.dev,resources=fqdnnetworkpolicies,verbs=get;list;watch;create;update;patch;delete
@@ -122,13 +126,14 @@ func (r *FQDNNetworkPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			ShortTTL:           res.TTL > 0 && res.TTL < shortTTLThreshold,
 		}
 		resolved = append(resolved, netv1alpha1.ResolvedHost{
-			Hostname:   rule.Match,
-			IPs:        allowedIPs,
-			CNAMEChain: res.CNAMEChain,
-			LastSeen:   metav1.Now(),
-			Source:     "active-lookup",
-			TTLSeconds: int32(ttl.Seconds()),
-			Security:   sec,
+			Hostname:      rule.Match,
+			IPs:           allowedIPs,
+			CNAMEChain:    res.CNAMEChain,
+			LastSeen:      metav1.Now(),
+			Source:        "active-lookup",
+			TTLSeconds:    int32(ttl.Seconds()),
+			Security:      sec,
+			IPEnrichments: buildIPEnrichments(r.Enricher, rule.Match, allowedIPs),
 		})
 
 		if fp.Spec.Security != nil && fp.Spec.Security.MaxCNAMEDepth != nil {

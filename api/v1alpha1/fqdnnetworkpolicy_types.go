@@ -82,6 +82,27 @@ type DNSSecurityMetadata struct {
 	ShortTTL bool `json:"shortTTL,omitempty"`
 }
 
+// IPEnrichment holds ASN/organization metadata for one resolved IP, fetched
+// from an opt-in ASN enricher (e.g. ipinfo.io). Only populated when an
+// enricher is configured via FQDNNP_ASN_ENRICHER.
+type IPEnrichment struct {
+	// ASN is the autonomous system number, e.g. "AS16509".
+	// +optional
+	ASN string `json:"asn,omitempty"`
+
+	// Org is the organization name from the ASN record, e.g. "Amazon.com Inc."
+	// +optional
+	Org string `json:"org,omitempty"`
+
+	// Country is the two-letter ISO country code.
+	// +optional
+	Country string `json:"country,omitempty"`
+
+	// EnrichedAt is when this data was last fetched.
+	// +optional
+	EnrichedAt *metav1.Time `json:"enrichedAt,omitempty"`
+}
+
 // FQDNNetworkPolicySpec defines the desired state.
 type FQDNNetworkPolicySpec struct {
 	// PodSelector targets which pods in this namespace the rules apply to.
@@ -163,6 +184,10 @@ type ResolvedHost struct {
 	// Absent when the snoop resolver is the resolution source.
 	// +optional
 	Security *DNSSecurityMetadata `json:"security,omitempty"`
+	// IPEnrichments holds optional ASN/org metadata per IP, keyed by IP address.
+	// Populated only when an ASN enricher is configured.
+	// +optional
+	IPEnrichments map[string]IPEnrichment `json:"ipEnrichments,omitempty"`
 }
 
 // FQDNNetworkPolicyStatus defines the observed state.

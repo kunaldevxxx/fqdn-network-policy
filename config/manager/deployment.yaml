@@ -36,3 +36,20 @@ spec:
             limits:
               cpu: 200m
               memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fqdn-network-policy-snoop
+  namespace: fqdn-network-policy-system
+spec:
+  # Only used when the controller is started with --enable-snoop-resolver.
+  # Point CoreDNS's forward plugin at this service (port 5353/UDP) so the
+  # controller sees actual pod DNS responses. See internal/dns/snoop_resolver.go.
+  selector:
+    app: fqdn-network-policy-controller
+  ports:
+    - name: dns-snoop
+      port: 5353
+      protocol: UDP
+      targetPort: 5353

@@ -137,6 +137,17 @@ var (
 	)
 )
 
+// ASN enrichment metrics
+var (
+	ASNChangeTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fqdnnp_asn_change_total",
+			Help: "Number of times a resolved IP's ASN/org changed between enrichment cycles.",
+		},
+		[]string{"hostname", "previous_asn", "current_asn"},
+	)
+)
+
 func init() {
 	metrics.Registry.MustRegister(
 		// DNS
@@ -157,5 +168,7 @@ func init() {
 		ReconcileDuration,
 		LeaderTransitions,
 		SnoopCacheSize,
+		// ASN enrichment
+		ASNChangeTotal,
 	)
 }

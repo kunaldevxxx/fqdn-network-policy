@@ -10,6 +10,7 @@ import (
 	netv1alpha1 "github.com/kunaldevxxx/fqdn-network-policy/api/v1alpha1"
 	"github.com/kunaldevxxx/fqdn-network-policy/internal/controller"
 	idns "github.com/kunaldevxxx/fqdn-network-policy/internal/dns"
+	"github.com/kunaldevxxx/fqdn-network-policy/internal/enrich"
 	_ "github.com/kunaldevxxx/fqdn-network-policy/internal/metrics"
 	"github.com/kunaldevxxx/fqdn-network-policy/internal/webhook"
 
@@ -41,6 +42,8 @@ func main() {
 		snoopListenAddr      string
 		snoopUpstream        string
 		enableMultiResolver  bool
+		asnEnricher          string
+		ipinfoToken          string
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080",
@@ -63,6 +66,11 @@ func main() {
 		"Upstream DNS address the SnoopResolver forwards to (defaults to CoreDNS address or system resolver).")
 	flag.BoolVar(&enableMultiResolver, "enable-multi-resolver", true,
 		"Query multiple public DNS resolvers and union results to reduce CDN IP divergence.")
+	flag.StringVar(&asnEnricher, "asn-enricher", os.Getenv("FQDNNP_ASN_ENRICHER"),
+		"Opt-in ASN/org enricher for resolved IPs: \"ipinfo\" or \"disabled\" (default). "+
+			"Also settable via FQDNNP_ASN_ENRICHER. Disabled by default: no external calls unless set.")
+	flag.StringVar(&ipinfoToken, "ipinfo-token", os.Getenv("FQDNNP_IPINFO_TOKEN"),
+		"Optional ipinfo.io API token for higher rate limits. Also settable via FQDNNP_IPINFO_TOKEN.")
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
@@ -95,6 +103,10 @@ func main() {
 	// ── Resolver selection ─────────────────────────────────────────────────
 	// Priority: SnoopResolver (best) > MultiResolver (good) > ActiveResolver (baseline)
 	var resolver idns.Resolver
+	// snoopResolver is non-nil only when the snoop resolver actually started;
+	// the FQDNEgressObservation controller needs the concrete type (not just
+	// the Resolver interface) to read its observation store.
+	var snoopResolver *idns.SnoopResolver
 
 	if enableSnoop {
 		upstream := snoopUpstream
@@ -111,6 +123,7 @@ func main() {
 			ctrl.Log.Info("snoop resolver started",
 				"listen", snoopListenAddr, "upstream", upstream)
 			resolver = sr
+			snoopResolver = sr
 		}
 	} else if enableMultiResolver {
 		ctrl.Log.Info("multi-resolver enabled (unions 4 public upstreams for CDN coverage)")
@@ -122,6 +135,12 @@ func main() {
 		resolver = idns.NewActiveResolver()
 	}
 
+	// ── ASN enricher (opt-in, disabled by default) ─────────────────────────
+	enricherMgr, enricherEnabled := enrich.NewManagerFromConfig(asnEnricher, ipinfoToken, ctrl.Log.WithName("enrich"))
+	if enricherEnabled {
+		ctrl.Log.Info("ASN enricher enabled", "backend", asnEnricher)
+	}
+
 	// ── FQDNNetworkPolicy controller ───────────────────────────────────────
 	churnTracker := idns.NewChurnTracker()
 
@@ -131,6 +150,7 @@ func main() {
 		Resolver:     resolver,
 		Recorder:     mgr.GetEventRecorderFor("fqdn-network-policy"), //nolint:staticcheck
 		ChurnTracker: churnTracker,
+		Enricher:     enricherMgr,
 	}).SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to create controller", "controller", "FQDNNetworkPolicy")
 		os.Exit(1)
@@ -143,8 +163,19 @@ func main() {
 		Resolver:     resolver,
 		Recorder:     mgr.GetEventRecorderFor("cluster-fqdn-network-policy"), //nolint:staticcheck
 		ChurnTracker: churnTracker,
+		Enricher:     enricherMgr,
 	}).SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to create controller", "controller", "ClusterFQDNNetworkPolicy")
+		os.Exit(1)
+	}
+
+	// ── FQDNEgressObservation controller ───────────────────────────────────
+	if err := (&controller.FQDNEgressObservationReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Snoop:  snoopResolver,
+	}).SetupWithManager(mgr); err != nil {
+		ctrl.Log.Error(err, "unable to create controller", "controller", "FQDNEgressObservation")
 		os.Exit(1)
 	}
 
@@ -172,6 +203,7 @@ func main() {
 		"leaderElection", enableLeaderElection,
 		"snoopEnabled", enableSnoop,
 		"multiResolverEnabled", enableMultiResolver,
+		"asnEnricherEnabled", enricherEnabled,
 	)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		ctrl.Log.Error(err, "problem running manager")

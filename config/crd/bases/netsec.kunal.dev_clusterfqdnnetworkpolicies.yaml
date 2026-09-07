@@ -346,6 +346,33 @@ spec:
                       type: array
                     hostname:
                       type: string
+                    ipEnrichments:
+                      additionalProperties:
+                        description: |-
+                          IPEnrichment holds ASN/organization metadata for one resolved IP, fetched
+                          from an opt-in ASN enricher (e.g. ipinfo.io). Only populated when an
+                          enricher is configured via FQDNNP_ASN_ENRICHER.
+                        properties:
+                          asn:
+                            description: ASN is the autonomous system number, e.g.
+                              "AS16509".
+                            type: string
+                          country:
+                            description: Country is the two-letter ISO country code.
+                            type: string
+                          enrichedAt:
+                            description: EnrichedAt is when this data was last fetched.
+                            format: date-time
+                            type: string
+                          org:
+                            description: Org is the organization name from the ASN
+                              record, e.g. "Amazon.com Inc."
+                            type: string
+                        type: object
+                      description: |-
+                        IPEnrichments holds optional ASN/org metadata per IP, keyed by IP address.
+                        Populated only when an ASN enricher is configured.
+                      type: object
                     ips:
                       items:
                         type: string

@@ -1,0 +1,11 @@
+apiVersion: netsec.kunal.dev/v1alpha1
+kind: FQDNEgressObservation
+metadata:
+  name: checkout
+  namespace: payments
+spec:
+  podSelector:
+    podSelector:
+      matchLabels:
+        app: checkout
+  observationWindow: 24h  # how long to accumulate before the result is considered stable
