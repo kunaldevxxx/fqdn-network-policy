@@ -37,6 +37,11 @@ type Resolution struct {
 	// ResolverDivergence is the count of IPs that appeared in fewer than
 	// all resolvers queried. Always 0 for single-resolver results.
 	ResolverDivergence int
+	// ResolverResults holds each upstream's individual answer, keyed by
+	// upstream address. Always populated by MultiResolver (nil for
+	// single-resolver strategies); callers decide whether it's worth
+	// persisting to status, typically only when ResolverDivergence > 0.
+	ResolverResults map[string][]string
 }
 
 // Resolver is implemented by every resolution strategy.

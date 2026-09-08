@@ -1,3 +1,71 @@
+# v0.3.0 — Resolver disagreement visibility, egress drift detection (2026-09-08)
+
+## Resolver disagreement (Issue #4)
+
+**The problem** `MultiResolver` already queries several upstream resolvers and unions their
+answers to cover CDN anycast divergence, but it discarded *which* resolver said what. An
+operator staring at a six-IP `ResolvedHost` for `api.stripe.com` couldn't tell whether that was
+expected anycast spread or something worth investigating (split-horizon leak, resolver
+poisoning, geo-DNS oddity).
+
+**ResolverResults + the `ResolverDivergence` condition** (`internal/dns/multi_resolver.go`,
+`api/v1alpha1/fqdnnetworkpolicy_types.go`) `MultiResolver.Resolve()` now returns each upstream's
+individual answer alongside the existing divergence count. Both `FQDNNetworkPolicy` and
+`ClusterFQDNNetworkPolicy` controllers copy the per-resolver breakdown into
+`status.resolvedHosts[].security.resolverResults` — only when `resolverDivergence > 0`, to keep
+status small in the common (agreeing) case — and always set an informational `ResolverDivergence`
+status condition summarizing which hostnames disagreed and by how much. A new
+`fqdnnp_resolver_divergence_total{hostname,policy}` counter tracks it in Prometheus.
+
+**Opt-in follow-ons** Two new `SecuritySpec` fields, both off by default:
+- `blockOnDivergence` freezes the currently-applied `NetworkPolicy` for a reconcile cycle rather
+  than admitting a divergent IP set, when any resolved host disagrees across resolvers.
+- `minResolverAgreement` is consensus mode: an IP is only allow-listed once at least that many
+  upstream resolvers agree on it.
+
+## Egress drift detection (Issue #6)
+
+**The problem** The controller enforces what a policy's `egress` says is allowed, but had no way
+to notice when a pod starts resolving a hostname no policy covers — the only signal was a dropped
+connection in CNI logs.
+
+**`status.observedUnpoliciedDomains`** (`internal/controller/drift.go`) When the snoop resolver is
+active, `FQDNNetworkPolicy` now diffs its namespace's combined `egress` rules against every
+hostname the snoop resolver has observed cluster-wide, and reports the ones no policy in the
+namespace covers. The diff is recomputed fresh every reconcile — not accumulated — so it clears
+on its own once a covering policy exists. Newly-observed drift is logged
+(`egress drift detected namespace=... domain=...`) and counted via
+`fqdnnp_unpolicied_domain_total{namespace,domain}`. No behavior change when the snoop resolver is
+inactive.
+
+Note on scope: observation is still cluster-wide, not per-pod (see
+`internal/dns/observation_store.go` for why CoreDNS's `forward` plugin makes that unrecoverable
+without a different interception mechanism) — "unpolicied" here means "not covered by any policy
+in this namespace," not "queried by a pod in this namespace." For the same reason, this release
+does not attempt automatic egress blocking based on drift: there's no reliable way to infer which
+pod selector to restrict from a bare hostname. Instead, `kubectl fqdn-policy suggest
+[namespace/]name` (`cmd/kubectl-fqdn_policy`) reads a policy's observed drift and prints a
+suggested `FQDNNetworkPolicy` manifest — starting in Audit mode — for a human to review and apply.
+Nothing is written to the cluster by this command.
+
+Known limitation: `fqdnnp_unpolicied_domain_total` can log/count a newly-drifted domain more
+than once when a fast reconcile races a status read against a write that hasn't landed yet
+(short-TTL hosts, or multiple policies in one namespace) — see `internal/controller/drift.go`.
+Not worth a dedup store for a signal whose job is "this is happening," not exact-once counting.
+
+## Verification
+
+Both features were exercised against real infrastructure via `./demo.sh` (kind + Calico +
+Stripe/GitHub/CoreDNS, not mocks): `fqdnnp_resolver_divergence_total` caught a genuine transient
+anycast disagreement on an early resolution of `api.stripe.com`/`api.github.com` before the
+resolvers settled, and `status.observedUnpoliciedDomains` correctly flagged `example.com` (queried
+but not in the sample policy's `egress`) and `ipinfo.io` (the ASN enricher's own outbound DNS
+lookup, also cluster-wide-visible) — including logging, the Prometheus counters, and
+`kubectl fqdn-policy suggest` producing a valid manifest from the result. `demo.sh` itself gained
+three new steps (13, 16, 17) covering this.
+
+---
+
 # v0.2.0 — Enterprise-grade: multi-resolver, cluster policies, audit mode, metrics, Helm, CI
 
 This release transforms the controller from a working scaffold into a system you can deploy

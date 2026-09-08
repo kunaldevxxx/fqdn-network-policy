@@ -148,6 +148,25 @@ var (
 	)
 )
 
+// Resolver divergence & egress drift metrics
+var (
+	ResolverDivergenceTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fqdnnp_resolver_divergence_total",
+			Help: "Number of times a resolved hostname showed resolver disagreement (ResolverDivergence > 0) during a reconcile.",
+		},
+		[]string{"hostname", "policy"},
+	)
+
+	UnpoliciedDomainTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fqdnnp_unpolicied_domain_total",
+			Help: "Number of times a newly-observed hostname was found uncovered by any FQDNNetworkPolicy in its namespace.",
+		},
+		[]string{"namespace", "domain"},
+	)
+)
+
 func init() {
 	metrics.Registry.MustRegister(
 		// DNS
@@ -170,5 +189,8 @@ func init() {
 		SnoopCacheSize,
 		// ASN enrichment
 		ASNChangeTotal,
+		// Resolver divergence & egress drift
+		ResolverDivergenceTotal,
+		UnpoliciedDomainTotal,
 	)
 }

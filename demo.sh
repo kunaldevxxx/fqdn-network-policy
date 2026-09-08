@@ -6,8 +6,8 @@
 # what it's doing and why, and the payoff (curl blocked vs curl allowed)
 # is the last two commands.
 #
-# Requires: kind, kubectl, docker, calicoctl not needed (we use the
-# Calico manifest directly).
+# Requires: kind, kubectl, docker, jq, make, go. calicoctl not needed (we
+# use the Calico manifest directly).
 set -euo pipefail
 
 CLUSTER_NAME="fqdn-demo"
@@ -141,6 +141,16 @@ EOF
 section "13. Generate fresh DNS traffic through the snoop proxy"
 kubectl -n "$NS" exec checkout-service -- curl -sS -o /dev/null -w "api.stripe.com -> HTTP %{http_code}\n" https://api.stripe.com
 kubectl -n "$NS" exec checkout-service -- curl -sS -o /dev/null -w "api.github.com -> HTTP %{http_code}\n" https://api.github.com
+# example.com is NOT in allow-stripe-and-github's egress list. Its TCP
+# connect is already blocked by the NetworkPolicy from step 9 -- but the
+# DNS lookup itself still succeeds (allowDNSRule always permits port 53,
+# to any destination, so resolution never breaks) and now flows through
+# the snoop proxy too. That's the exact signal Issue #6's egress drift
+# detection is built to catch: a hostname pods are resolving that no
+# policy covers.
+set +e
+kubectl -n "$NS" exec checkout-service -- curl -sS --max-time 5 -o /dev/null -w "example.com   -> HTTP %{http_code} (blocked, but the DNS lookup is still observed)\n" https://example.com
+set -e
 
 # The FQDNEgressObservation controller re-reconciles every ~60s on its own,
 # but its very first reconcile (right after creation, before the curls
@@ -148,6 +158,11 @@ kubectl -n "$NS" exec checkout-service -- curl -sS -o /dev/null -w "api.github.c
 # annotation-only update still triggers a reconcile (no generation-changed
 # filter is applied), so nudge it now instead of waiting out the timer.
 kubectl -n "$NS" annotate fqdnegressobservation cluster-egress-observation \
+  netsec.kunal.dev/demo-kick="$(date +%s)" --overwrite >/dev/null
+# Same trick for allow-stripe-and-github: its own reconcile loop is on a
+# DNS-TTL-based timer (up to a few minutes for these hosts), not a fixed
+# poll, and it's the object that computes status.observedUnpoliciedDomains.
+kubectl -n "$NS" annotate fqdnnetworkpolicy allow-stripe-and-github \
   netsec.kunal.dev/demo-kick="$(date +%s)" --overwrite >/dev/null
 
 section "14. Wait for observed domains and ASN enrichment to land in status"
@@ -169,6 +184,15 @@ for i in $(seq 1 45); do
   sleep 2
 done
 
+echo "waiting for allow-stripe-and-github to reconcile the example.com drift..."
+for i in $(seq 1 45); do
+  DRIFT=$(kubectl -n "$NS" get fqdnnetworkpolicy allow-stripe-and-github \
+    -o jsonpath='{.status.observedUnpoliciedDomains[*].hostname}' 2>/dev/null || true)
+  [ -n "$DRIFT" ] && { echo "  drift observed: $DRIFT (attempt $i)"; break; }
+  echo "  attempt $i/45 -- not yet, retrying in 2s..."
+  sleep 2
+done
+
 section "15. Show what got discovered"
 echo "--- FQDNEgressObservation: hostnames observed cluster-wide ---"
 kubectl -n "$NS" get fqdnegressobservation cluster-egress-observation -o yaml
@@ -178,5 +202,32 @@ kubectl -n "$NS" get fqdnnetworkpolicy allow-stripe-and-github -o go-template='
 {{- range $ip, $e := .ipEnrichments}}
   {{$ip}} -> {{$e.asn}} {{$e.org}} ({{$e.country}}){{end}}
 {{end}}'
+
+section "16. Resolver disagreement and egress drift (Issue #4 / Issue #6)"
+echo "--- ResolverDivergence condition (always set -- True or False every reconcile) ---"
+kubectl -n "$NS" get fqdnnetworkpolicy allow-stripe-and-github \
+  -o jsonpath='{range .status.conditions[?(@.type=="ResolverDivergence")]}{.status}{" "}{.reason}{" "}{.message}{"\n"}{end}'
+echo "--- Per-host resolver security metadata (resolverResults appears only when resolverDivergence > 0) ---"
+kubectl -n "$NS" get fqdnnetworkpolicy allow-stripe-and-github -o json | \
+  jq -r '.status.resolvedHosts[] | "  \(.hostname): resolverDivergence=\(.security.resolverDivergence // 0)"'
+echo "--- status.observedUnpoliciedDomains: hostnames observed but not covered by any policy in this namespace ---"
+kubectl -n "$NS" get fqdnnetworkpolicy allow-stripe-and-github \
+  -o jsonpath='{.status.observedUnpoliciedDomains}' | jq '.' 2>/dev/null || echo "  (empty -- drift not observed yet)"
+echo "--- controller log line for the drift above ---"
+kubectl logs -n fqdn-network-policy-system \
+  -l app=fqdn-network-policy-controller --tail=200 | grep "egress drift detected" || true
+echo "--- Prometheus counters for both signals ---"
+kubectl -n fqdn-network-policy-system port-forward deployment/fqdn-network-policy-controller 18080:8080 \
+  >/tmp/fqdn-demo-portforward.log 2>&1 &
+PF_PID=$!
+sleep 2
+curl -sS http://127.0.0.1:18080/metrics | grep '^fqdnnp_unpolicied_domain_total' || echo "  fqdnnp_unpolicied_domain_total: not yet incremented"
+curl -sS http://127.0.0.1:18080/metrics | grep '^fqdnnp_resolver_divergence_total' || echo "  fqdnnp_resolver_divergence_total: no divergence this run -- resolvers agreed"
+kill "$PF_PID" 2>/dev/null || true
+wait "$PF_PID" 2>/dev/null || true
+
+section "17. Suggest a policy from the observed drift (nothing is written to the cluster)"
+make kubectl-plugin >/dev/null
+./bin/kubectl-fqdn_policy suggest "$NS/allow-stripe-and-github"
 
 section "Done. Tear down with: kind delete cluster --name $CLUSTER_NAME"

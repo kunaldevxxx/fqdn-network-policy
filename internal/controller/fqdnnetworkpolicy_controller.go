@@ -42,6 +42,10 @@ type FQDNNetworkPolicyReconciler struct {
 	// Enricher is nil when the ASN enricher is not configured (default);
 	// the reconciler makes no external calls in that case.
 	Enricher *enrich.Manager
+	// Snoop is nil when the snoop resolver isn't enabled. Used only to
+	// detect egress drift (Issue #6, see drift.go); a nil Snoop means no
+	// behavior change -- ObservedUnpoliciedDomains is never touched.
+	Snoop *dns.SnoopResolver
 }
 
 // +kubebuilder:rbac:groups=netsec.kunal.dev,resources=fqdnnetworkpolicies,verbs=get;list;watch;create;update;patch;delete
@@ -99,8 +103,24 @@ func (r *FQDNNetworkPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 		ttlQueue.Upsert(rule.Match, ttl)
 
+		// Consensus mode (opt-in, Issue #4 follow-on): drop IPs too few
+		// resolvers agreed on before the private/loopback/link-local filter.
+		// A no-op when unconfigured or when the resolver has no per-upstream
+		// breakdown to check against.
+		consensusIPs := res.IPs
+		if fp.Spec.Security != nil && fp.Spec.Security.MinResolverAgreement != nil {
+			var rejected []consensusRejectedIP
+			consensusIPs, rejected = filterByConsensus(res.IPs, res.ResolverResults, int(*fp.Spec.Security.MinResolverAgreement))
+			for _, rj := range rejected {
+				msg := rj.message(rule.Match)
+				resolutionErrors = append(resolutionErrors, msg)
+				logger.Info("blocked IP by consensus", "hostname", rule.Match, "ip", rj.IP, "agreement", rj.Agreement, "required", rj.Required)
+				r.Recorder.Eventf(&fp, "Warning", "ConsensusBlocked", "%s", msg)
+			}
+		}
+
 		// Drop private / loopback / link-local IPs per security policy.
-		allowedIPs, blockedIPs := filterBlockedIPs(res.IPs, fp.Spec.Security)
+		allowedIPs, blockedIPs := filterBlockedIPs(consensusIPs, fp.Spec.Security)
 		for _, b := range blockedIPs {
 			msg := b.message(rule.Match)
 			resolutionErrors = append(resolutionErrors, msg)
@@ -119,10 +139,16 @@ func (r *FQDNNetworkPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		if r.ChurnTracker != nil {
 			churnRate = r.ChurnTracker.Record(rule.Match, allowedIPs)
 		}
+		var resolverResults map[string][]string
+		if res.ResolverDivergence > 0 {
+			resolverResults = res.ResolverResults
+			metrics.ResolverDivergenceTotal.WithLabelValues(rule.Match, fp.Name).Inc()
+		}
 		sec := &netv1alpha1.DNSSecurityMetadata{
 			DNSSECValidated:    res.DNSSECValidated,
 			IPChurnRate:        churnRate,
 			ResolverDivergence: res.ResolverDivergence,
+			ResolverResults:    resolverResults,
 			ShortTTL:           res.TTL > 0 && res.TTL < shortTTLThreshold,
 		}
 		resolved = append(resolved, netv1alpha1.ResolvedHost{
@@ -145,13 +171,16 @@ func (r *FQDNNetworkPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 	}
 
+	fp.Status.ResolvedHosts = resolved
+	setResolverDivergenceCondition(&fp, resolved)
+	r.recordDrift(ctx, &fp, logger)
+
 	// Audit mode: log only, no NetworkPolicy writes.
 	if fp.Spec.Mode == netv1alpha1.PolicyModeAudit {
 		logger.Info("audit mode: resolved hosts (no NetworkPolicy written)",
 			"policy", fp.Name, "hosts", resolved)
 		r.Recorder.Event(&fp, "Normal", "AuditResolved",
 			"Audit mode: resolved FQDNs without writing NetworkPolicy")
-		fp.Status.ResolvedHosts = resolved
 		fp.Status.GeneratedNetworkPolicy = ""
 		fp.Status.ObservedGeneration = fp.Generation
 		setCondition(&fp, "Ready", metav1.ConditionTrue, "AuditMode",
@@ -162,8 +191,24 @@ func (r *FQDNNetworkPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{RequeueAfter: nextRequeue(&fp, ttlQueue)}, nil
 	}
 
+	// Opt-in (Issue #4 follow-on): freeze the applied NetworkPolicy rather
+	// than admitting a divergent IP set when resolvers disagree this cycle.
+	if blockOnDivergence(fp.Spec.Security) && anyDivergence(resolved) {
+		logger.Info("resolver divergence detected, skipping NetworkPolicy update", "policy", fp.Name)
+		r.Recorder.Event(&fp, "Warning", "DivergenceBlocked",
+			"Resolver disagreement detected; retaining previously-applied NetworkPolicy")
+		fp.Status.ObservedGeneration = fp.Generation
+		setCondition(&fp, "Ready", metav1.ConditionFalse, "DivergenceBlocked",
+			"resolver disagreement detected; NetworkPolicy update skipped")
+		setCondition(&fp, "Degraded", metav1.ConditionTrue, "DivergenceBlocked",
+			"resolver disagreement detected; NetworkPolicy update skipped")
+		if err := r.Status().Update(ctx, &fp); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: nextRequeue(&fp, ttlQueue)}, nil
+	}
+
 	// Enforce mode: build and conditionally apply the NetworkPolicy.
-	fp.Status.ResolvedHosts = resolved
 	desired, err := netpol.Build(&fp)
 	if err != nil {
 		return ctrl.Result{}, err

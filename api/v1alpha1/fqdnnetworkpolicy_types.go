@@ -75,6 +75,13 @@ type DNSSecurityMetadata struct {
 	// +optional
 	ResolverDivergence int `json:"resolverDivergence,omitempty"`
 
+	// ResolverResults holds each upstream resolver's individual answer for
+	// this hostname, keyed by resolver address. Populated only when
+	// ResolverDivergence is greater than zero, to keep status small in the
+	// common case where all resolvers agree.
+	// +optional
+	ResolverResults map[string][]string `json:"resolverResults,omitempty"`
+
 	// ShortTTL is true when the observed TTL is below the configured minimum
 	// (default 10 s). Short TTLs combined with high IPChurnRate are a common
 	// indicator of fast-flux DNS.
@@ -163,6 +170,25 @@ type SecuritySpec struct {
 	// from the resolved allow-list. Defaults to true.
 	// +optional
 	BlockLinkLocal *bool `json:"blockLinkLocal,omitempty"`
+
+	// BlockOnDivergence skips applying the generated NetworkPolicy for a
+	// reconcile cycle in which any resolved host shows resolver disagreement
+	// (security.resolverDivergence > 0 in that host's DNS security metadata),
+	// retaining the previously-applied NetworkPolicy instead of admitting the
+	// divergent IP set. Status (ResolvedHosts, the ResolverDivergence
+	// condition) still updates so operators can see why the policy froze.
+	// Defaults to false: divergent IPs are unioned in as today.
+	// +optional
+	BlockOnDivergence *bool `json:"blockOnDivergence,omitempty"`
+
+	// MinResolverAgreement enables consensus mode: an IP is included in the
+	// allow-list only if at least this many upstream resolvers returned it.
+	// Requires per-resolver result data (the multi-resolver or snoop
+	// resolver); a no-op when that data isn't available. Unset or 1 means
+	// no filtering (today's union-of-all-resolvers behavior).
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	MinResolverAgreement *int32 `json:"minResolverAgreement,omitempty"`
 }
 
 // ResolvedHost records the last known IPs for one matched hostname.
@@ -203,13 +229,21 @@ type FQDNNetworkPolicyStatus struct {
 	GeneratedNetworkPolicy string `json:"generatedNetworkPolicy,omitempty"`
 
 	// Conditions follow the standard metav1.Condition pattern.
-	// Condition types: Ready, Resolving, Degraded.
+	// Condition types: Ready, Resolving, Degraded, ResolverDivergence.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// ObservedGeneration lets us detect stale status vs spec.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// ObservedUnpoliciedDomains lists hostnames resolved cluster-wide via the
+	// snoop resolver that are not covered by this or any other
+	// FQDNNetworkPolicy in this namespace. Populated only when the snoop
+	// resolver is active. Recomputed fresh each reconcile (not additive),
+	// so it clears automatically once a covering policy exists.
+	// +optional
+	ObservedUnpoliciedDomains []ObservedDomain `json:"observedUnpoliciedDomains,omitempty"`
 }
 
 // +kubebuilder:object:root=true

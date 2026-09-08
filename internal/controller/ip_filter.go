@@ -59,6 +59,45 @@ func matchingCIDR(ip net.IP, nets []*net.IPNet) *net.IPNet {
 	return nil
 }
 
+// consensusRejectedIP describes an IP dropped by consensus-mode filtering.
+type consensusRejectedIP struct {
+	IP        string
+	Agreement int
+	Required  int
+}
+
+func (c consensusRejectedIP) message(hostname string) string {
+	return fmt.Sprintf("%s resolved to %s, but only %d of %d required resolvers agreed on it (blocked by security.minResolverAgreement)",
+		hostname, c.IP, c.Agreement, c.Required)
+}
+
+// filterByConsensus keeps only IPs that at least minAgreement upstream
+// resolvers returned, per results (upstream address -> IPs it returned).
+// A nil or empty results map means no per-resolver data is available (e.g.
+// a plain ActiveResolver), in which case every IP passes through unfiltered
+// -- consensus mode is a no-op without divergence data to check against.
+func filterByConsensus(ips []string, results map[string][]string, minAgreement int) (allowed []string, rejected []consensusRejectedIP) {
+	if len(results) == 0 || minAgreement <= 1 {
+		return ips, nil
+	}
+
+	agreement := make(map[string]int, len(ips))
+	for _, upstreamIPs := range results {
+		for _, ip := range upstreamIPs {
+			agreement[ip]++
+		}
+	}
+
+	for _, ip := range ips {
+		if count := agreement[ip]; count >= minAgreement {
+			allowed = append(allowed, ip)
+		} else {
+			rejected = append(rejected, consensusRejectedIP{IP: ip, Agreement: count, Required: minAgreement})
+		}
+	}
+	return allowed, rejected
+}
+
 // filterBlockedIPs splits ips into allowed and blocked based on the security
 // spec. When sec is nil every block category is active (fail-safe default).
 // An explicit *bool false in the spec opts out of that specific check.

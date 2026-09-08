@@ -151,6 +151,7 @@ func main() {
 		Recorder:     mgr.GetEventRecorderFor("fqdn-network-policy"), //nolint:staticcheck
 		ChurnTracker: churnTracker,
 		Enricher:     enricherMgr,
+		Snoop:        snoopResolver,
 	}).SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to create controller", "controller", "FQDNNetworkPolicy")
 		os.Exit(1)

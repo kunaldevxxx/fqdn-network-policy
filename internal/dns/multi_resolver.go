@@ -138,10 +138,27 @@ func (m *MultiResolver) Resolve(ctx context.Context, hostname string) (Resolutio
 		ips = append(ips, ip)
 	}
 
+	resolverResults := make(map[string][]string, len(upstreamIPs))
+	for upstream, uips := range upstreamIPs {
+		list := make([]string, 0, len(uips))
+		for ip := range uips {
+			list = append(list, ip)
+		}
+		resolverResults[upstream] = list
+	}
+
 	ttl := clampTTL(minTTL)
 	m.cache.Record(hostname, ips, ttl)
 
-	return Resolution{Hostname: hostname, IPs: ips, CNAMEChain: cnameChain, TTL: ttl, DNSSECValidated: dnssecValidated, ResolverDivergence: divergence}, nil
+	return Resolution{
+		Hostname:           hostname,
+		IPs:                ips,
+		CNAMEChain:         cnameChain,
+		TTL:                ttl,
+		DNSSECValidated:    dnssecValidated,
+		ResolverDivergence: divergence,
+		ResolverResults:    resolverResults,
+	}, nil
 }
 
 func queryUpstream(c *mdns.Client, hostname, upstream string, qtype uint16) ([]string, []string, time.Duration, bool, error) {

@@ -5,6 +5,7 @@ import (
 
 	netv1alpha1 "github.com/kunaldevxxx/fqdn-network-policy/api/v1alpha1"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func boolPtr(b bool) *bool { return &b }
@@ -112,6 +113,40 @@ func TestBlockedIP_Message(t *testing.T) {
 	assert.Contains(t, msg, "api.example.com")
 	assert.Contains(t, msg, "10.0.0.5")
 	assert.Contains(t, msg, "blockPrivateIPs")
+}
+
+// ── filterByConsensus (Issue #4 follow-on: consensus mode) ────────────────
+
+func TestFilterByConsensus_NoResultsData_NoOp(t *testing.T) {
+	allowed, rejected := filterByConsensus([]string{"1.1.1.1", "2.2.2.2"}, nil, 2)
+	assert.ElementsMatch(t, []string{"1.1.1.1", "2.2.2.2"}, allowed)
+	assert.Empty(t, rejected)
+}
+
+func TestFilterByConsensus_MinAgreementOne_NoOp(t *testing.T) {
+	results := map[string][]string{"a": {"1.1.1.1"}, "b": {"2.2.2.2"}}
+	allowed, rejected := filterByConsensus([]string{"1.1.1.1", "2.2.2.2"}, results, 1)
+	assert.ElementsMatch(t, []string{"1.1.1.1", "2.2.2.2"}, allowed)
+	assert.Empty(t, rejected)
+}
+
+func TestFilterByConsensus_DropsIPsBelowThreshold(t *testing.T) {
+	results := map[string][]string{
+		"a": {"1.1.1.1", "9.9.9.9"},
+		"b": {"1.1.1.1", "2.2.2.2"},
+	}
+	allowed, rejected := filterByConsensus([]string{"1.1.1.1", "2.2.2.2", "9.9.9.9"}, results, 2)
+	assert.Equal(t, []string{"1.1.1.1"}, allowed)
+	require.Len(t, rejected, 2)
+	assert.ElementsMatch(t, []string{"2.2.2.2", "9.9.9.9"}, []string{rejected[0].IP, rejected[1].IP})
+}
+
+func TestConsensusRejectedIP_Message(t *testing.T) {
+	r := consensusRejectedIP{IP: "9.9.9.9", Agreement: 1, Required: 2}
+	msg := r.message("api.example.com")
+	assert.Contains(t, msg, "api.example.com")
+	assert.Contains(t, msg, "9.9.9.9")
+	assert.Contains(t, msg, "minResolverAgreement")
 }
 
 // ── DNS rebinding scenario ────────────────────────────────────────────────
