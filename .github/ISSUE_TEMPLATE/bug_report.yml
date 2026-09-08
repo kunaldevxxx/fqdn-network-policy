@@ -1,0 +1,74 @@
+name: Bug report
+description: Something isn't working as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: check [Known limitations](../../README.md#known-limitations) in the
+        README — a few things (e.g. cluster-wide-only DNS observation) are documented, deliberate
+        tradeoffs rather than bugs.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: What did you expect, and what actually happened instead?
+    validations:
+      required: true
+
+  - type: input
+    id: controller-version
+    attributes:
+      label: Controller version / image tag
+      placeholder: "v0.2.1, or the image digest if built from main"
+    validations:
+      required: true
+
+  - type: input
+    id: k8s-version
+    attributes:
+      label: Kubernetes version and CNI
+      placeholder: "e.g. EKS 1.30, Calico"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: resolver-mode
+    attributes:
+      label: Resolver mode in use
+      multiple: true
+      options:
+        - SnoopResolver (--enable-snoop-resolver)
+        - MultiResolver (--enable-multi-resolver, default)
+        - CoreDNSResolver (--coredns-address)
+        - ActiveResolver (system resolver fallback)
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: policy-yaml
+    attributes:
+      label: Relevant FQDNNetworkPolicy / ClusterFQDNNetworkPolicy / FQDNEgressObservation YAML
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: status
+    attributes:
+      label: status.conditions / status.resolvedHosts from the affected object
+      description: "`kubectl get <kind> <name> -o yaml` — the status block is usually the fastest way to tell what the controller thinks happened."
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Controller logs
+      description: "`kubectl logs -n fqdn-network-policy-system -l app=fqdn-network-policy-controller --tail=100`"
+      render: shell
+    validations:
+      required: false

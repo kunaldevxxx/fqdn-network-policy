@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/kunaldevxxx/fqdn-network-policy/security/advisories/new
+    about: Please report vulnerabilities privately rather than as a public issue — see SECURITY.md.
