@@ -138,9 +138,12 @@ func (s *SnoopResolver) Resolve(ctx context.Context, hostname string) (Resolutio
 	}
 
 	return Resolution{
-		Hostname: hostname,
-		IPs:      combined,
-		TTL:      ttl,
+		Hostname:           hostname,
+		IPs:                combined,
+		TTL:                ttl,
+		DNSSECValidated:    active.DNSSECValidated,
+		ResolverDivergence: active.ResolverDivergence,
+		ResolverResults:    active.ResolverResults,
 	}, nil
 }
 

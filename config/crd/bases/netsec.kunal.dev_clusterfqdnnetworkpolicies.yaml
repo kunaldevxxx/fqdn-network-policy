@@ -242,6 +242,16 @@ spec:
                       BlockLoopback drops loopback addresses (127.0.0.0/8, ::1/128) from the
                       resolved allow-list. Defaults to true.
                     type: boolean
+                  blockOnDivergence:
+                    description: |-
+                      BlockOnDivergence skips applying the generated NetworkPolicy for a
+                      reconcile cycle in which any resolved host shows resolver disagreement
+                      (security.resolverDivergence > 0 in that host's DNS security metadata),
+                      retaining the previously-applied NetworkPolicy instead of admitting the
+                      divergent IP set. Status (ResolvedHosts, the ResolverDivergence
+                      condition) still updates so operators can see why the policy froze.
+                      Defaults to false: divergent IPs are unioned in as today.
+                    type: boolean
                   blockPrivateIPs:
                     description: |-
                       BlockPrivateIPs drops RFC1918 (10/8, 172.16/12, 192.168/16) and CGNAT
@@ -257,6 +267,16 @@ spec:
                     maximum: 10
                     minimum: 0
                     type: integer
+                  minResolverAgreement:
+                    description: |-
+                      MinResolverAgreement enables consensus mode: an IP is included in the
+                      allow-list only if at least this many upstream resolvers returned it.
+                      Requires per-resolver result data (the multi-resolver or snoop
+                      resolver); a no-op when that data isn't available. Unset or 1 means
+                      no filtering (today's union-of-all-resolvers behavior).
+                    format: int32
+                    minimum: 1
+                    type: integer
                 type: object
             required:
             - egress
@@ -271,7 +291,9 @@ spec:
                   type: string
                 type: array
               conditions:
-                description: Conditions follow the standard metav1.Condition pattern.
+                description: |-
+                  Conditions follow the standard metav1.Condition pattern.
+                  Condition types: Ready, ResolverDivergence.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -402,6 +424,17 @@ spec:
                             ResolverDivergence is the number of IPs that appeared in fewer than
                             all resolvers queried. Zero means full agreement across resolvers.
                           type: integer
+                        resolverResults:
+                          additionalProperties:
+                            items:
+                              type: string
+                            type: array
+                          description: |-
+                            ResolverResults holds each upstream resolver's individual answer for
+                            this hostname, keyed by resolver address. Populated only when
+                            ResolverDivergence is greater than zero, to keep status small in the
+                            common case where all resolvers agree.
+                          type: object
                         shortTTL:
                           description: |-
                             ShortTTL is true when the observed TTL is below the configured minimum

@@ -147,6 +147,17 @@ api.stripe.com
 
 Warnings shown for: private / loopback / link-local IPs, resolver divergence, CNAME chain depth > 3.
 
+### suggest — draft a policy from observed egress drift
+
+```bash
+kubectl fqdn-policy suggest payments/checkout
+```
+
+Reads the named `FQDNNetworkPolicy`'s `status.observedUnpoliciedDomains` (see
+[Detecting egress drift](#detecting-egress-drift)) and prints a suggested `FQDNNetworkPolicy`
+manifest — one rule per drifted hostname, starting in `Audit` mode — for you to review, edit, and
+`kubectl apply -f -` yourself. Nothing is written to the cluster by this command.
+
 ---
 
 ## Installation
@@ -329,6 +340,48 @@ coreDNS:
 
 ---
 
+## Resolver disagreement
+
+`MultiResolver` unions answers from several upstreams, which is exactly the right default for
+CDN anycast — but a large IP set can also mean something worth a second look (split-horizon
+leak, resolver poisoning, a geo-DNS oddity), and unioning silently threw away which resolver said
+what. When resolvers disagree on a hostname, that's now visible:
+
+```bash
+kubectl get fqdnnetworkpolicy allow-payment-apis -n payments -o yaml
+```
+
+```yaml
+status:
+  resolvedHosts:
+    - hostname: api.stripe.com
+      security:
+        resolverDivergence: 2
+        resolverResults:            # only present when resolverDivergence > 0
+          1.1.1.1:53: ["3.1.4.1", "3.1.4.2"]
+          8.8.8.8:53: ["3.1.4.1"]
+  conditions:
+    - type: ResolverDivergence
+      status: "True"
+      reason: ResolverDisagreement
+      message: "api.stripe.com: 2 resolvers returned 2 IPs total, 1 IPs appeared in only 1 resolver"
+```
+
+`fqdnnp_resolver_divergence_total{hostname,policy}` tracks the same signal in Prometheus.
+
+**Opt-in follow-ons**, both off by default in `spec.security`:
+
+- **`blockOnDivergence`** — freeze the currently-applied `NetworkPolicy` for a reconcile cycle
+  instead of admitting a divergent IP set. Status still updates (so you can see why), but no
+  `NetworkPolicy` write happens until the next clean resolution.
+- **`minResolverAgreement`** — consensus mode. An IP only makes it into the allow-list once at
+  least this many upstream resolvers agree on it. Requires per-resolver result data (MultiResolver
+  or SnoopResolver); a no-op with a plain `ActiveResolver`/`CoreDNSResolver`.
+
+Neither changes the default union behavior unless you turn them on.
+
+---
+
 ## ASN/org enrichment (opt-in)
 
 Annotate resolved IPs with autonomous-system and organization data, so an operator can tell at a
@@ -419,6 +472,53 @@ both are follow-on features that depend on this data being available.
 
 ---
 
+## Detecting egress drift
+
+A compromised dependency, a misconfigured app, or a supply-chain issue can cause a pod to start
+resolving a hostname no policy covers — and until now the only signal was a dropped connection in
+CNI logs. When the snoop resolver is active, every `FQDNNetworkPolicy` now compares its
+namespace's combined `egress` rules against every hostname observed cluster-wide and reports the
+ones nothing in the namespace covers:
+
+```bash
+kubectl get fqdnnetworkpolicy checkout -n payments -o jsonpath='{.status.observedUnpoliciedDomains}' | jq
+```
+
+```json
+[
+  { "hostname": "telemetry.vendor.com", "firstSeen": "2026-09-07T09:00:00Z", "lastSeen": "2026-09-07T14:22:00Z" }
+]
+```
+
+A newly-observed drifted hostname is logged (`egress drift detected namespace=payments
+domain=telemetry.vendor.com`) and counted via `fqdnnp_unpolicied_domain_total{namespace,domain}`.
+The field is recomputed fresh every reconcile rather than accumulated, so it clears on its own
+once a policy in the namespace covers the hostname. No behavior change when the snoop resolver is
+inactive.
+
+**Same cluster-wide caveat as `FQDNEgressObservation` above applies here too:** "unpolicied" means
+"not covered by any `FQDNNetworkPolicy` in this namespace," not "queried by a pod in this
+namespace" — the underlying observation still can't be attributed to a source pod. If two
+`FQDNNetworkPolicy` objects share a namespace, each recomputes the same diff independently, so a
+single newly-drifting hostname can be logged/counted once per object rather than exactly once.
+
+**Out of scope: automatic egress blocking.** There's no reliable way to infer which pod selector
+to lock down from a bare hostname observation, so this controller does not attempt it — doing so
+blindly could just as easily block legitimate traffic from a pod nothing was ever wrong with.
+Instead, review the suggested policy yourself:
+
+```bash
+kubectl fqdn-policy suggest payments/checkout > suggested-policy.yaml
+# review it, then:
+kubectl apply -f suggested-policy.yaml
+```
+
+This reads `status.observedUnpoliciedDomains` and prints a starting-point `FQDNNetworkPolicy` —
+in `Audit` mode, so it has no effect until you review it and flip `spec.mode` to `Enforce`.
+Nothing is written to the cluster by this command.
+
+---
+
 ## Spec reference
 
 ### `FQDNNetworkPolicy`
@@ -432,6 +532,12 @@ both are follow-on features that depend on this data being available.
 | `spec.egress[].ports[].protocol` | `TCP` \| `UDP` \| `SCTP` | `TCP` | Transport protocol. |
 | `spec.resolutionTTLOverride` | int32 | — | Re-resolution interval in seconds (5–300). Overrides DNS TTLs. Useful for sources with unreliable TTL values. |
 | `spec.coreDNSAddress` | string | — | `host:port` of cluster CoreDNS (e.g. `10.96.0.10:53`). Queries CoreDNS rather than the node resolver to reduce internal DNS divergence. |
+| `spec.security.maxCNAMEDepth` | int32 | no limit | Raises a `Degraded` condition when a hostname's CNAME chain exceeds this depth. |
+| `spec.security.blockPrivateIPs` | bool | `true` | Drops RFC1918/CGNAT addresses from the resolved allow-list. |
+| `spec.security.blockLoopback` | bool | `true` | Drops loopback addresses from the resolved allow-list. |
+| `spec.security.blockLinkLocal` | bool | `true` | Drops link-local addresses from the resolved allow-list. |
+| `spec.security.blockOnDivergence` | bool | `false` | Freezes the applied `NetworkPolicy` for a reconcile cycle rather than admitting a divergent IP set, when any resolved host's `resolverDivergence > 0`. See [Resolver disagreement](#resolver-disagreement). |
+| `spec.security.minResolverAgreement` | int32 | `1` (no filtering) | Consensus mode: an IP is allow-listed only once at least this many upstream resolvers agree on it. No-op without per-resolver result data (multi-resolver/snoop resolver). See [Resolver disagreement](#resolver-disagreement). |
 
 ### `ClusterFQDNNetworkPolicy`
 
@@ -463,7 +569,10 @@ kubectl get fqdnnetworkpolicy <name> -o jsonpath='{.status.conditions}' | jq
 | `Ready` | `True` | `Reconciled` | NetworkPolicy is up to date. |
 | `Ready` | `False` | `ResolutionDegraded` | One or more hosts failed to resolve. Stale IPs are kept — access is not revoked on a transient DNS error. |
 | `Ready` | `True` | `AuditMode` | Audit mode is active; no NetworkPolicy was written. |
+| `Ready` / `Degraded` | `False` / `True` | `DivergenceBlocked` | `spec.security.blockOnDivergence` is set and resolvers disagreed this cycle; the previously-applied NetworkPolicy was kept as-is. |
 | `Degraded` | `True` | `ResolutionErrors` | Companion to `Ready=False`; carries error detail. |
+| `ResolverDivergence` | `True` | `ResolverDisagreement` | At least one resolved host's upstream resolvers disagreed on its IPs this cycle. Message names each affected hostname. See [Resolver disagreement](#resolver-disagreement). |
+| `ResolverDivergence` | `False` | `NoDivergence` | All resolvers agreed on every resolved hostname this cycle. |
 
 ### Kubernetes Events
 
@@ -476,7 +585,7 @@ Events are published for: `NetworkPolicyCreated`, `NetworkPolicyUpdated`, `Resol
 
 ### Prometheus metrics
 
-The controller exposes 16 metrics at `:8080/metrics`. Key metrics:
+The controller exposes 18 metrics at `:8080/metrics`. Key metrics:
 
 | Metric | Type | Description |
 |--------|------|-------------|
@@ -491,6 +600,8 @@ The controller exposes 16 metrics at `:8080/metrics`. Key metrics:
 | `fqdn_cluster_managed_namespaces_total` | Gauge | Namespaces receiving policies from `ClusterFQDNNetworkPolicy`. |
 | `fqdn_reconcile_duration_seconds` | Histogram | End-to-end reconcile time per controller. |
 | `fqdnnp_asn_change_total` | Counter | ASN/org enrichment changes between cycles, by hostname/previous/current ASN (opt-in enricher only). |
+| `fqdnnp_resolver_divergence_total` | Counter | Times a resolved hostname showed resolver disagreement, by hostname/policy. See [Resolver disagreement](#resolver-disagreement). |
+| `fqdnnp_unpolicied_domain_total` | Counter | Times a newly-observed hostname was found uncovered by any policy in its namespace, by namespace/domain. See [Detecting egress drift](#detecting-egress-drift). |
 
 Enable a `ServiceMonitor` for prometheus-operator:
 ```yaml
@@ -592,6 +703,8 @@ internal/controller/
   clusterfqdnnetworkpolicy_controller.go  Cluster-scoped reconcile + fanout
   fqdnegressobservation_controller.go  Cluster-wide DNS observation reconcile loop
   enrichment.go                        Wires internal/enrich into ResolvedHost status
+  resolver_divergence.go               ResolverDivergence condition + opt-in block/consensus helpers
+  drift.go                             ObservedUnpoliciedDomains diff against namespace policies
 
 internal/netpol/
   builder.go                           Converts resolved IPs → NetworkPolicy
@@ -601,7 +714,7 @@ internal/webhook/
   validate.go                          ValidatingAdmissionWebhook HTTP handler
 
 internal/metrics/
-  metrics.go                           16 Prometheus metrics
+  metrics.go                           18 Prometheus metrics
 
 cmd/main.go                            Manager setup, flag parsing, resolver wiring
 cmd/kubectl-fqdn_policy/main.go        kubectl plugin: preview + diff subcommands
@@ -643,6 +756,8 @@ the generated output alongside any type changes.
 | Webhook TLS requires cert-manager or manual cert provisioning | cert-manager integration is included in the Helm chart |
 | `FQDNEgressObservation` reports cluster-wide, not per-pod or per-namespace | Fundamental limitation of CoreDNS's `forward` plugin, not a bug — see [Discovering egress domains](#discovering-egress-domains-fqdnegressobservation) |
 | ASN enricher depends on ipinfo.io reachability and its rate limits | Opt-in and disabled by default; results are cached 6h per IP to stay within free-tier limits |
+| `status.observedUnpoliciedDomains` can't attribute a hostname to a source pod, same as `FQDNEgressObservation` | Same CoreDNS `forward` limitation — see [Detecting egress drift](#detecting-egress-drift). No automatic egress blocking is attempted for this reason; use `kubectl fqdn-policy suggest` for a human-reviewed starting point instead |
+| `fqdnnp_unpolicied_domain_total` can log/count a newly-drifted domain more than once | Confirmed via `demo.sh`: a fast re-reconcile of a short-TTL host (or two `FQDNNetworkPolicy` objects sharing a namespace) can both read a status snapshot from before the other's write landed and both see the domain as "new." Not worth a shared dedup store for a metric whose job is "this is happening," not exact-once counting — see `internal/controller/drift.go` |
 
 ## License
 

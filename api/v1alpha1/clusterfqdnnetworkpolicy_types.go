@@ -55,6 +55,7 @@ type ClusterFQDNNetworkPolicyStatus struct {
 	AffectedNamespaces []string `json:"affectedNamespaces,omitempty"`
 
 	// Conditions follow the standard metav1.Condition pattern.
+	// Condition types: Ready, ResolverDivergence.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 

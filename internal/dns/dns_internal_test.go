@@ -215,6 +215,56 @@ func TestMultiResolver_Resolve_CacheHit(t *testing.T) {
 	assert.Contains(t, res.IPs, "5.5.5.5")
 }
 
+func TestMultiResolver_Resolve_Divergence(t *testing.T) {
+	// Two upstreams disagree on the same hostname -- neither IP is returned
+	// by both, so every IP counts as divergent.
+	addr1, stop1 := startMockDNS(t, map[string][]string{
+		"api.example.com": {"1.1.1.1"},
+	})
+	defer stop1()
+	addr2, stop2 := startMockDNS(t, map[string][]string{
+		"api.example.com": {"2.2.2.2"},
+	})
+	defer stop2()
+
+	mr := &MultiResolver{
+		upstreams: []string{addr1, addr2},
+		client:    &mdns.Client{Net: "udp", Timeout: 3 * time.Second},
+		cache:     NewIPCache(),
+		fallback:  NewActiveResolver(),
+	}
+
+	res, err := mr.Resolve(context.Background(), "api.example.com")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"1.1.1.1", "2.2.2.2"}, res.IPs)
+	assert.Equal(t, 2, res.ResolverDivergence)
+	require.Len(t, res.ResolverResults, 2)
+	assert.ElementsMatch(t, []string{"1.1.1.1"}, res.ResolverResults[addr1])
+	assert.ElementsMatch(t, []string{"2.2.2.2"}, res.ResolverResults[addr2])
+}
+
+func TestMultiResolver_Resolve_NoDivergence_WhenResolversAgree(t *testing.T) {
+	addr1, stop1 := startMockDNS(t, map[string][]string{
+		"api.example.com": {"1.2.3.4"},
+	})
+	defer stop1()
+	addr2, stop2 := startMockDNS(t, map[string][]string{
+		"api.example.com": {"1.2.3.4"},
+	})
+	defer stop2()
+
+	mr := &MultiResolver{
+		upstreams: []string{addr1, addr2},
+		client:    &mdns.Client{Net: "udp", Timeout: 3 * time.Second},
+		cache:     NewIPCache(),
+		fallback:  NewActiveResolver(),
+	}
+
+	res, err := mr.Resolve(context.Background(), "api.example.com")
+	require.NoError(t, err)
+	assert.Equal(t, 0, res.ResolverDivergence)
+}
+
 func TestMultiResolver_Resolve_AllUpstreamsFail_Fallback(t *testing.T) {
 	// All upstreams unreachable with a short timeout; falls back to system resolver.
 	mr := &MultiResolver{

@@ -84,8 +84,23 @@ func (r *ClusterFQDNNetworkPolicyReconciler) Reconcile(ctx context.Context, req 
 			ttl = defaultPollInterval
 		}
 		ttlQueue.Upsert(rule.Match, ttl)
+
+		// Consensus mode (opt-in, Issue #4 follow-on): drop IPs too few
+		// resolvers agreed on before the private/loopback/link-local filter.
+		consensusIPs := res.IPs
+		if cp.Spec.Security != nil && cp.Spec.Security.MinResolverAgreement != nil {
+			var rejected []consensusRejectedIP
+			consensusIPs, rejected = filterByConsensus(res.IPs, res.ResolverResults, int(*cp.Spec.Security.MinResolverAgreement))
+			for _, rj := range rejected {
+				msg := rj.message(rule.Match)
+				resolutionErrors = append(resolutionErrors, msg)
+				logger.Info("blocked IP by consensus", "hostname", rule.Match, "ip", rj.IP, "agreement", rj.Agreement, "required", rj.Required)
+				r.Recorder.Eventf(&cp, "Warning", "ConsensusBlocked", "%s", msg)
+			}
+		}
+
 		// Drop private / loopback / link-local IPs per security policy.
-		allowedIPs, blockedIPs := filterBlockedIPs(res.IPs, cp.Spec.Security)
+		allowedIPs, blockedIPs := filterBlockedIPs(consensusIPs, cp.Spec.Security)
 		for _, b := range blockedIPs {
 			msg := b.message(rule.Match)
 			resolutionErrors = append(resolutionErrors, msg)
@@ -102,10 +117,16 @@ func (r *ClusterFQDNNetworkPolicyReconciler) Reconcile(ctx context.Context, req 
 		if r.ChurnTracker != nil {
 			churnRate = r.ChurnTracker.Record(rule.Match, allowedIPs)
 		}
+		var resolverResults map[string][]string
+		if res.ResolverDivergence > 0 {
+			resolverResults = res.ResolverResults
+			metrics.ResolverDivergenceTotal.WithLabelValues(rule.Match, cp.Name).Inc()
+		}
 		sec := &netv1alpha1.DNSSecurityMetadata{
 			DNSSECValidated:    res.DNSSECValidated,
 			IPChurnRate:        churnRate,
 			ResolverDivergence: res.ResolverDivergence,
+			ResolverResults:    resolverResults,
 			ShortTTL:           res.TTL > 0 && res.TTL < shortTTLThreshold,
 		}
 		resolved = append(resolved, netv1alpha1.ResolvedHost{
@@ -134,13 +155,24 @@ func (r *ClusterFQDNNetworkPolicyReconciler) Reconcile(ctx context.Context, req 
 		return ctrl.Result{}, err
 	}
 
+	setClusterResolverDivergenceCondition(&cp, resolved)
+
 	// Audit mode: log and update status, but do not write any NetworkPolicies.
 	if cp.Spec.Mode == netv1alpha1.PolicyModeAudit {
 		logger.Info("audit mode: no NetworkPolicies written",
 			"policy", cp.Name, "namespaces", len(matchedNS))
 		r.Recorder.Eventf(&cp, "Normal", "AuditResolved",
 			"Audit mode: %d namespaces matched, no NetworkPolicies written", len(matchedNS))
-		return r.updateClusterStatus(ctx, &cp, resolved, matchedNS, resolutionErrors, ttlQueue)
+		return r.updateClusterStatus(ctx, &cp, resolved, matchedNS, resolutionErrors, ttlQueue, false)
+	}
+
+	// Opt-in (Issue #4 follow-on): freeze all managed NetworkPolicies rather
+	// than admitting a divergent IP set when resolvers disagree this cycle.
+	if blockOnDivergence(cp.Spec.Security) && anyDivergence(resolved) {
+		logger.Info("resolver divergence detected, skipping NetworkPolicy fan-out", "policy", cp.Name)
+		r.Recorder.Event(&cp, "Warning", "DivergenceBlocked",
+			"Resolver disagreement detected; retaining previously-applied NetworkPolicies")
+		return r.updateClusterStatus(ctx, &cp, resolved, matchedNS, resolutionErrors, ttlQueue, true)
 	}
 
 	// Enforce mode: fan out one NetworkPolicy per matched namespace.
@@ -187,7 +219,7 @@ func (r *ClusterFQDNNetworkPolicyReconciler) Reconcile(ctx context.Context, req 
 		logger.Error(gcErr, "garbage collection failed")
 	}
 
-	return r.updateClusterStatus(ctx, &cp, resolved, matchedNS, resolutionErrors, ttlQueue)
+	return r.updateClusterStatus(ctx, &cp, resolved, matchedNS, resolutionErrors, ttlQueue, false)
 }
 
 // matchedNamespaces lists active namespaces whose labels satisfy NamespaceSelector.
@@ -273,36 +305,24 @@ func (r *ClusterFQDNNetworkPolicyReconciler) updateClusterStatus(
 	namespaces []string,
 	resolutionErrors []string,
 	ttlQueue *dns.TTLQueue,
+	divergenceBlocked bool,
 ) (ctrl.Result, error) {
 	cp.Status.ResolvedHosts = resolved
 	cp.Status.AffectedNamespaces = namespaces
 	cp.Status.ObservedGeneration = cp.Generation
 
-	cond := metav1.Condition{
-		Type:               "Ready",
-		ObservedGeneration: cp.Generation,
-		LastTransitionTime: metav1.Now(),
+	switch {
+	case divergenceBlocked:
+		setClusterCondition(cp, "Ready", metav1.ConditionFalse, "DivergenceBlocked",
+			"resolver disagreement detected; NetworkPolicy fan-out skipped")
+		setClusterCondition(cp, "Degraded", metav1.ConditionTrue, "DivergenceBlocked",
+			"resolver disagreement detected; NetworkPolicy fan-out skipped")
+	case len(resolutionErrors) > 0:
+		setClusterCondition(cp, "Ready", metav1.ConditionFalse, "ResolutionDegraded", strings.Join(resolutionErrors, "; "))
+	default:
+		setClusterCondition(cp, "Ready", metav1.ConditionTrue, "Reconciled", "NetworkPolicies synced to all matched namespaces")
 	}
-	if len(resolutionErrors) > 0 {
-		cond.Status = metav1.ConditionFalse
-		cond.Reason = "ResolutionDegraded"
-		cond.Message = strings.Join(resolutionErrors, "; ")
-	} else {
-		cond.Status = metav1.ConditionTrue
-		cond.Reason = "Reconciled"
-		cond.Message = "NetworkPolicies synced to all matched namespaces"
-	}
-	for i, c := range cp.Status.Conditions {
-		if c.Type == cond.Type {
-			if c.Status == cond.Status {
-				cond.LastTransitionTime = c.LastTransitionTime
-			}
-			cp.Status.Conditions[i] = cond
-			goto updated
-		}
-	}
-	cp.Status.Conditions = append(cp.Status.Conditions, cond)
-updated:
+
 	if err := r.Status().Update(ctx, cp); err != nil {
 		return ctrl.Result{}, err
 	}

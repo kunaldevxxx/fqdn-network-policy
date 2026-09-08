@@ -46,7 +46,8 @@ func main() {
 Examples:
   kubectl fqdn-policy preview policy.yaml
   kubectl fqdn-policy diff payments/allow-payment-apis
-  kubectl fqdn-policy diff allow-payment-apis -n payments`,
+  kubectl fqdn-policy diff allow-payment-apis -n payments
+  kubectl fqdn-policy suggest payments/checkout`,
 	}
 
 	previewCmd := &cobra.Command{
@@ -67,7 +68,22 @@ Examples:
 	diffCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Namespace of the policy")
 	diffCmd.Flags().StringVar(&coreDNSAddr, "coredns-address", "", "CoreDNS host:port to query directly")
 
-	root.AddCommand(previewCmd, diffCmd)
+	suggestCmd := &cobra.Command{
+		Use:   "suggest [namespace/]name",
+		Short: "Suggest a new FQDNNetworkPolicy manifest from observed egress drift",
+		Long: `Reads an existing FQDNNetworkPolicy's status.observedUnpoliciedDomains
+(populated by the controller when the snoop resolver is active, see Issue #6)
+and prints a suggested FQDNNetworkPolicy manifest covering those domains.
+
+Nothing is written to the cluster -- review, edit, and "kubectl apply -f -"
+the output yourself. The suggested policy starts in Audit mode so it has no
+enforcement effect until you deliberately switch it to Enforce.`,
+		Args: cobra.ExactArgs(1),
+		RunE: runSuggest,
+	}
+	suggestCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Namespace of the policy")
+
+	root.AddCommand(previewCmd, diffCmd, suggestCmd)
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -312,6 +328,79 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	if !anyChange {
 		fmt.Println("No changes — fresh resolution matches live NetworkPolicy IPs.")
 	}
+	return nil
+}
+
+// ── suggest ────────────────────────────────────────────────────────────────
+
+// runSuggest is the human-reviewed substitute for "automatic policy
+// generation from drift" (Issue #6's named follow-on). It never writes to
+// the cluster: it only reads the named FQDNNetworkPolicy's observed drift
+// and prints a manifest for the operator to review and apply themselves.
+//
+// This is deliberately as far as automation goes here -- there's no way to
+// attribute an observed hostname to a specific pod/selector (see
+// internal/dns/observation_store.go), so a human has to decide what the
+// suggested rule's blast radius should actually be before it's applied.
+func runSuggest(cmd *cobra.Command, args []string) error {
+	ns := namespace
+	name := args[0]
+	if parts := strings.SplitN(args[0], "/", 2); len(parts) == 2 {
+		ns, name = parts[0], parts[1]
+	}
+	if ns == "" {
+		return fmt.Errorf("namespace required — use -n <namespace> or <namespace>/<name>")
+	}
+
+	k8sClient, err := buildK8sClient()
+	if err != nil {
+		return fmt.Errorf("connecting to cluster: %w", err)
+	}
+
+	ctx := context.Background()
+	var fp netv1alpha1.FQDNNetworkPolicy
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &fp); err != nil {
+		return fmt.Errorf("fetching %s/%s: %w", ns, name, err)
+	}
+
+	if len(fp.Status.ObservedUnpoliciedDomains) == 0 {
+		fmt.Printf("No egress drift observed for %s/%s — nothing to suggest.\n", ns, name)
+		fmt.Println("(Requires the snoop resolver to be active and at least one reconcile since drift appeared.)")
+		return nil
+	}
+
+	egress := make([]netv1alpha1.FQDNRule, 0, len(fp.Status.ObservedUnpoliciedDomains))
+	for _, d := range fp.Status.ObservedUnpoliciedDomains {
+		egress = append(egress, netv1alpha1.FQDNRule{Match: d.Hostname})
+	}
+
+	suggested := netv1alpha1.FQDNNetworkPolicy{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: netv1alpha1.GroupVersion.String(),
+			Kind:       "FQDNNetworkPolicy",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name + "-suggested",
+			Namespace: ns,
+		},
+		Spec: netv1alpha1.FQDNNetworkPolicySpec{
+			PodSelector: fp.Spec.PodSelector,
+			Egress:      egress,
+			// Audit mode: this manifest has no enforcement effect until a
+			// human deliberately switches it to Enforce.
+			Mode: netv1alpha1.PolicyModeAudit,
+		},
+	}
+
+	out, err := yaml.Marshal(&suggested)
+	if err != nil {
+		return fmt.Errorf("marshalling suggested policy: %w", err)
+	}
+
+	fmt.Printf("# Suggested FQDNNetworkPolicy covering %d domain(s) observed as drift against %s/%s.\n", len(egress), ns, name)
+	fmt.Println("# Nothing was written to the cluster — review, edit, and `kubectl apply -f -` yourself.")
+	fmt.Println("# Starts in Audit mode: switch spec.mode to Enforce once you're satisfied with the rules.")
+	fmt.Print(string(out))
 	return nil
 }
 
