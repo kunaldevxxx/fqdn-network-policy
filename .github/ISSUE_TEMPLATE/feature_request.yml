@@ -1,0 +1,43 @@
+name: Feature request
+description: Propose a new feature or behavior change.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The features that land fastest here follow a Problem / Proposed change / Acceptance
+        criteria / Out of scope shape — see recent closed issues for examples. You don't have to
+        fill in every field below, but the more concrete the acceptance criteria, the easier this
+        is to review and implement.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What's missing or broken today? Who runs into this, and when?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: What would you add or change? Include a sketch of new CRD fields, status shape, flags, or metrics if relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: How would we know this is done? Bullet points are great.
+    validations:
+      required: false
+
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: Anything deliberately excluded from this request (follow-on work, etc.)
+    validations:
+      required: false

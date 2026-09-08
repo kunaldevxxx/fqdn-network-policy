@@ -42,6 +42,10 @@ manifests: controller-gen ## Regenerate CRD YAML and RBAC from +kubebuilder mark
 build: generate ## Build the manager binary.
 	go build -o bin/manager ./cmd
 
+.PHONY: run
+run: generate ## Run the controller against your current kubeconfig context.
+	go run ./cmd
+
 .PHONY: test
 test: generate ## Run unit tests.
 	go test ./... -v
