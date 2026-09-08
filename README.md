@@ -1,15 +1,21 @@
+<div align="center">
+
 # fqdn-network-policy
+
+**FQDN-based egress control for Kubernetes, on any CNI.**
+
+Write egress rules against hostnames instead of hand-curated CIDR lists. The controller resolves
+them to IPs, tracks DNS TTLs, and reconciles a standard `networking.k8s.io/v1 NetworkPolicy` —
+so enforcement stays with whatever CNI you already run: Calico, AWS VPC CNI, Azure CNI, Flannel,
+or anything else that honors `NetworkPolicy`.
 
 [![CI](https://github.com/kunaldevxxx/fqdn-network-policy/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kunaldevxxx/fqdn-network-policy/actions/workflows/ci.yml)
 [![E2E KinD](https://github.com/kunaldevxxx/fqdn-network-policy/actions/workflows/ci.yml/badge.svg?branch=main&label=E2E+KinD)](https://github.com/kunaldevxxx/fqdn-network-policy/actions/workflows/ci.yml)
 [![Go 1.26](https://img.shields.io/badge/go-1.26-00ADD8?logo=go)](https://go.dev/doc/go1.26)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![kubectl plugin](https://img.shields.io/badge/kubectl-fqdn--policy-326CE5?logo=kubernetes&logoColor=white)](#kubectl-plugin)
 
-FQDN-based egress control for Kubernetes clusters on **any CNI** — Calico, AWS VPC CNI,
-Azure CNI, Flannel, or anything else that enforces standard `networking.k8s.io/v1 NetworkPolicy`.
-
-Write egress rules against hostnames. The controller resolves them to IPs, tracks DNS TTLs, and
-reconciles a standard `NetworkPolicy` so enforcement stays with the CNI you already run.
+</div>
 
 ```yaml
 apiVersion: netsec.kunal.dev/v1alpha1
@@ -33,6 +39,31 @@ spec:
         - port: 443
           protocol: TCP
 ```
+
+<details>
+<summary><strong>Table of contents</strong></summary>
+
+- [Why this exists](#why-this-exists)
+- [How it compares](#how-it-compares)
+- [Architecture](#architecture)
+- [kubectl plugin](#kubectl-plugin)
+- [Installation](#installation)
+- [Writing policies](#writing-policies)
+- [Resolver strategy](#resolver-strategy)
+- [Resolver disagreement](#resolver-disagreement)
+- [ASN/org enrichment (opt-in)](#asnorg-enrichment-opt-in)
+- [Discovering egress domains: `FQDNEgressObservation`](#discovering-egress-domains-fqdnegressobservation)
+- [Detecting egress drift](#detecting-egress-drift)
+- [Spec reference](#spec-reference)
+- [Status and observability](#status-and-observability)
+- [Admission webhook](#admission-webhook)
+- [High availability](#high-availability)
+- [Production deployment checklist](#production-deployment-checklist)
+- [Project layout](#project-layout)
+- [Development](#development)
+- [Known limitations](#known-limitations)
+
+</details>
 
 ## Why this exists
 
@@ -58,6 +89,7 @@ lists is error-prone and breaks silently. This controller keeps those lists curr
 | **Multi-upstream resolver** | **Yes** — unions Cloudflare, Google, Quad9, OpenDNS | No | No | No | No |
 | **Infrastructure additions** | None | Replace CNI | Replace CNI | Replace CNI | Service mesh |
 
+> [!TIP]
 > **Choose Cilium** if you need exact per-pod DNS accuracy at scale and can replace your CNI.
 > **Choose this project** if you need portable egress control on the CNI you already run, with zero infrastructure additions.
 
@@ -75,16 +107,56 @@ in-kernel packet interception.
 
 ## Architecture
 
-<img width="1853" height="1968" alt="mermaid-diagram-2026-08-27-111233" src="https://github.com/user-attachments/assets/f36e198b-33d0-4ddc-ba25-98a444a5e611" />
+```mermaid
+flowchart TD
+    YAML["FQDNNetworkPolicy /<br/>ClusterFQDNNetworkPolicy YAML"] -->|kubectl apply| Webhook
 
+    subgraph CP[Control plane]
+        Webhook["Admission webhook<br/>syntax, wildcards, ports"]
+        Controller["Controller<br/>reconcile loop"]
+        Webhook --> Controller
+    end
 
+    subgraph RES[Resolution]
+        Resolver["Resolver<br/>Active / Multi / CoreDNS / Snoop"]
+        Filter["Security filter<br/>private IPs, consensus, divergence"]
+        Builder["NetworkPolicy builder"]
+        Resolver --> Filter --> Builder
+    end
 
-**Fail-closed:** if no hosts have resolved yet (first reconcile, cold start, all lookups failed),
-the controller emits a deny-all-egress policy rather than a permissive no-op. DNS egress
-(UDP/TCP port 53) is always permitted in the generated policy so resolution can continue.
+    Controller --> Resolver
+    Builder --> NP["networking.k8s.io/v1<br/>NetworkPolicy"]
 
-**Transient DNS safety:** a resolution failure retains the last known-good IPs for that host rather
-than revoking access. The `Degraded` status condition is set while this fallback is active.
+    subgraph DNS[DNS path]
+        CoreDNS["CoreDNS"]
+        Snoop["SnoopResolver proxy"]
+        Upstream["Upstream resolvers"]
+        CoreDNS -->|forward| Snoop --> Upstream
+    end
+
+    Resolver -->|active lookups| Upstream
+    Snoop -.->|observed IPs + hostnames| Resolver
+
+    subgraph DP[Data plane]
+        CNI["CNI<br/>Calico, AWS VPC CNI, Azure CNI, ..."]
+        Pod["Workload pod"]
+        Pod -->|DNS query| CoreDNS
+    end
+
+    NP --> CNI
+    CNI ==>|egress enforced| Pod
+
+    classDef hot fill:#1f6feb,color:#fff,stroke:#1f6feb;
+    class Controller,Builder hot
+```
+
+> [!NOTE]
+> **Fail-closed:** if no hosts have resolved yet (first reconcile, cold start, all lookups
+> failed), the controller emits a deny-all-egress policy rather than a permissive no-op. DNS
+> egress (UDP/TCP port 53) is always permitted in the generated policy so resolution can continue.
+>
+> **Transient DNS safety:** a resolution failure retains the last known-good IPs for that host
+> rather than revoking access. The `Degraded` status condition is set while this fallback is active.
 
 ---
 
@@ -453,22 +525,24 @@ kubectl get fqdnegressobservation checkout-observation -n payments \
 ]
 ```
 
-**Important — this is cluster-wide, not per-pod.** `spec.podSelector` is accepted for forward
-compatibility but has no filtering effect today: CoreDNS's `forward` plugin re-originates every
-forwarded query as its own client, so the snoop proxy can never see which pod actually asked —
-only that a query happened, somewhere in the cluster. `status.observedDomains` reflects every
-hostname resolved cluster-wide, regardless of this object's namespace or `podSelector`. Real
-per-pod attribution would need either a custom CoreDNS build (the `edns0` plugin, which carries
-the real client as an EDNS Client-Subnet option, but isn't compiled into the standard
-`registry.k8s.io/coredns/coredns` image) or a different interception mechanism entirely
-(eBPF/iptables at the source pod) — both out of scope here.
+> [!WARNING]
+> **This is cluster-wide, not per-pod.** `spec.podSelector` is accepted for forward compatibility
+> but has no filtering effect today: CoreDNS's `forward` plugin re-originates every forwarded
+> query as its own client, so the snoop proxy can never see which pod actually asked — only that
+> a query happened, somewhere in the cluster. `status.observedDomains` reflects every hostname
+> resolved cluster-wide, regardless of this object's namespace or `podSelector`. Real per-pod
+> attribution would need either a custom CoreDNS build (the `edns0` plugin, which carries the
+> real client as an EDNS Client-Subnet option, but isn't compiled into the standard
+> `registry.k8s.io/coredns/coredns` image) or a different interception mechanism entirely
+> (eBPF/iptables at the source pod) — both out of scope here.
 
 Requires `--enable-snoop-resolver=true` (see [SnoopResolver setup](#snoopresolver-setup)); the
 controller sets a `Degraded` condition when the snoop resolver isn't active. `observedDomains`
 accumulates additively across reconciles, so it survives controller restarts.
 
-**Out of scope:** auto-generating an `FQDNNetworkPolicy` from the observation, opening a Git PR —
-both are follow-on features that depend on this data being available.
+> [!NOTE]
+> **Out of scope:** auto-generating an `FQDNNetworkPolicy` from the observation, opening a Git PR
+> — both are follow-on features that depend on this data being available.
 
 ---
 
@@ -496,16 +570,19 @@ The field is recomputed fresh every reconcile rather than accumulated, so it cle
 once a policy in the namespace covers the hostname. No behavior change when the snoop resolver is
 inactive.
 
-**Same cluster-wide caveat as `FQDNEgressObservation` above applies here too:** "unpolicied" means
-"not covered by any `FQDNNetworkPolicy` in this namespace," not "queried by a pod in this
-namespace" — the underlying observation still can't be attributed to a source pod. If two
-`FQDNNetworkPolicy` objects share a namespace, each recomputes the same diff independently, so a
-single newly-drifting hostname can be logged/counted once per object rather than exactly once.
+> [!WARNING]
+> **Same cluster-wide caveat as `FQDNEgressObservation` above applies here too:** "unpolicied"
+> means "not covered by any `FQDNNetworkPolicy` in this namespace," not "queried by a pod in
+> this namespace" — the underlying observation still can't be attributed to a source pod. If
+> two `FQDNNetworkPolicy` objects share a namespace, each recomputes the same diff independently,
+> so a single newly-drifting hostname can be logged/counted once per object rather than exactly
+> once.
 
-**Out of scope: automatic egress blocking.** There's no reliable way to infer which pod selector
-to lock down from a bare hostname observation, so this controller does not attempt it — doing so
-blindly could just as easily block legitimate traffic from a pod nothing was ever wrong with.
-Instead, review the suggested policy yourself:
+> [!NOTE]
+> **Out of scope: automatic egress blocking.** There's no reliable way to infer which pod
+> selector to lock down from a bare hostname observation, so this controller does not attempt
+> it — doing so blindly could just as easily block legitimate traffic from a pod nothing was
+> ever wrong with. Instead, review the suggested policy yourself:
 
 ```bash
 kubectl fqdn-policy suggest payments/checkout > suggested-policy.yaml
@@ -741,9 +818,10 @@ go test -short ./...         # unit tests (skips network-dependent tests)
 go test -race  ./...         # full test suite including network tests
 ```
 
-**Codegen note:** do not hand-edit `zz_generated.deepcopy.go` or any file under
-`config/crd/bases/`. Both are overwritten by `make generate` and `make manifests`. Commit
-the generated output alongside any type changes.
+> [!WARNING]
+> **Codegen note:** do not hand-edit `zz_generated.deepcopy.go` or any file under
+> `config/crd/bases/`. Both are overwritten by `make generate` and `make manifests`. Commit
+> the generated output alongside any type changes.
 
 ## Known limitations
 
