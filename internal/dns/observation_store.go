@@ -13,15 +13,17 @@ const observationRetention = 48 * time.Hour
 // map scan, so a busy snoop resolver isn't scanning on every single query.
 const pruneRetentionCheckInterval = 5 * time.Minute
 
-// FirstLastSeen is the first/last observation time for one hostname.
+// FirstLastSeen is the first/last observation time and query volume for one hostname.
 type FirstLastSeen struct {
-	FirstSeen time.Time
-	LastSeen  time.Time
+	FirstSeen  time.Time
+	LastSeen   time.Time
+	QueryCount int64
 }
 
 type domainObservation struct {
-	firstSeen time.Time
-	lastSeen  time.Time
+	firstSeen  time.Time
+	lastSeen   time.Time
+	queryCount int64
 }
 
 // ObservationStore records which hostnames the SnoopResolver has seen
@@ -61,21 +63,22 @@ func (o *ObservationStore) Record(hostname string) {
 
 	if obs, ok := o.domains[hostname]; ok {
 		obs.lastSeen = now
+		obs.queryCount++
 	} else {
-		o.domains[hostname] = &domainObservation{firstSeen: now, lastSeen: now}
+		o.domains[hostname] = &domainObservation{firstSeen: now, lastSeen: now, queryCount: 1}
 	}
 	o.pruneLocked()
 }
 
 // AllDomains returns every hostname observed cluster-wide, with first/last
-// seen times.
+// seen times and query counts.
 func (o *ObservationStore) AllDomains() map[string]FirstLastSeen {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
 	result := make(map[string]FirstLastSeen, len(o.domains))
 	for hostname, obs := range o.domains {
-		result[hostname] = FirstLastSeen{FirstSeen: obs.firstSeen, LastSeen: obs.lastSeen}
+		result[hostname] = FirstLastSeen{FirstSeen: obs.firstSeen, LastSeen: obs.lastSeen, QueryCount: obs.queryCount}
 	}
 	return result
 }

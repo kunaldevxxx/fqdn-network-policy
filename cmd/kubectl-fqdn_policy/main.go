@@ -13,6 +13,7 @@ import (
 	netv1alpha1 "github.com/kunaldevxxx/fqdn-network-policy/api/v1alpha1"
 	idns "github.com/kunaldevxxx/fqdn-network-policy/internal/dns"
 	"github.com/kunaldevxxx/fqdn-network-policy/internal/netpol"
+	"github.com/kunaldevxxx/fqdn-network-policy/internal/profiler"
 
 	"github.com/spf13/cobra"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -29,6 +30,20 @@ var (
 	coreDNSAddr     string
 	noMultiResolver bool
 	namespace       string
+
+	profileFromFile       string
+	profileFromObs        string
+	profileWildcardThresh int
+	profilePreset         string
+	profileAppLabel       string
+	profileMode           string
+	profileName           string
+	profileOutput         string
+
+	simulateFromObs     string
+	simulateBaseline    string
+	simulateFailBlocked bool
+	simulateJSON        bool
 )
 
 var cgnatNet *net.IPNet
@@ -40,13 +55,14 @@ func init() {
 func main() {
 	root := &cobra.Command{
 		Use:   "kubectl-fqdn_policy",
-		Short: "Inspect and preview FQDN network policies",
-		Long: `kubectl fqdn-policy — preview and diff FQDNNetworkPolicy resources.
+		Short: "Inspect, preview, profile, and simulate FQDN network policies",
+		Long: `kubectl fqdn-policy — preview, diff, profile, and simulate FQDNNetworkPolicy resources.
 
 Examples:
   kubectl fqdn-policy preview policy.yaml
   kubectl fqdn-policy diff payments/allow-payment-apis
-  kubectl fqdn-policy diff allow-payment-apis -n payments
+  kubectl fqdn-policy profile cluster-egress-observation -n payments
+  kubectl fqdn-policy simulate policy.yaml --baseline observation.yaml
   kubectl fqdn-policy suggest payments/checkout`,
 	}
 
@@ -83,7 +99,53 @@ enforcement effect until you deliberately switch it to Enforce.`,
 	}
 	suggestCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Namespace of the policy")
 
-	root.AddCommand(previewCmd, diffCmd, suggestCmd)
+	profileCmd := &cobra.Command{
+		Use:   "profile [observation-name]",
+		Short: "Discover and synthesize a production FQDNNetworkPolicy from observed egress traffic",
+		Long: `Analyzes DNS queries observed by FQDNEgressObservation (or an offline observation file),
+filters out cluster-internal DNS names (.cluster.local, arpa, loopback), clusters high-cardinality
+subdomains into wildcards (*.stripe.com), classifies by provider, and outputs a ready-to-apply
+FQDNNetworkPolicy starting safely in Audit mode.
+
+Examples:
+  kubectl fqdn-policy profile cluster-egress-observation -n payments
+  kubectl fqdn-policy profile --from-file observation.yaml --wildcard-threshold 3
+  kubectl fqdn-policy profile -n payments --app-label app=checkout --preset strict`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: runProfile,
+	}
+	profileCmd.Flags().StringVarP(&namespace, "namespace", "n", "default", "Namespace of the observation and target policy")
+	profileCmd.Flags().StringVar(&profileFromFile, "from-file", "", "Path to an offline YAML/JSON FQDNEgressObservation file (works offline/air-gapped)")
+	profileCmd.Flags().StringVar(&profileFromObs, "from-observation", "", "Name of the FQDNEgressObservation resource in the cluster")
+	profileCmd.Flags().IntVar(&profileWildcardThresh, "wildcard-threshold", 3, "Number of subdomains under same base domain required to roll up to wildcard (*.example.com). 0 to disable")
+	profileCmd.Flags().StringVar(&profilePreset, "preset", "production", "Security preset: production (blockPrivateIPs), strict (+blockOnDivergence, minResolverAgreement=3), relaxed")
+	profileCmd.Flags().StringVar(&profileAppLabel, "app-label", "", "Pod label selector key=value for the generated policy (e.g. app=checkout)")
+	profileCmd.Flags().StringVar(&profileMode, "mode", "Audit", "Policy mode: Audit or Enforce")
+	profileCmd.Flags().StringVar(&profileName, "name", "", "Name of the generated FQDNNetworkPolicy (defaults to <obs-name>-policy)")
+	profileCmd.Flags().StringVarP(&profileOutput, "output", "o", "", "File path to write generated policy YAML (defaults to stdout)")
+
+	simulateCmd := &cobra.Command{
+		Use:   "simulate <policy.yaml | [namespace/]policy-name>",
+		Short: "Simulate blast radius and preview traffic impact before enforcing a policy",
+		Long: `Simulates an FQDNNetworkPolicy against real observed cluster DNS queries (from an active
+FQDNEgressObservation or an offline baseline file). Identifies exactly which domains will be permitted
+and which domains will be BLOCKED, alerting operators to missing dependencies and potential outages
+before switching to Enforce mode.
+
+Examples:
+  kubectl fqdn-policy simulate policy.yaml --baseline observation.yaml
+  kubectl fqdn-policy simulate payments/checkout-policy --fail-on-blocked
+  kubectl fqdn-policy simulate policy.yaml --json`,
+		Args: cobra.ExactArgs(1),
+		RunE: runSimulate,
+	}
+	simulateCmd.Flags().StringVarP(&namespace, "namespace", "n", "default", "Namespace of the policy")
+	simulateCmd.Flags().StringVar(&simulateFromObs, "from-observation", "", "Name of the FQDNEgressObservation resource to evaluate against")
+	simulateCmd.Flags().StringVar(&simulateBaseline, "baseline", "", "Path to an offline baseline file (FQDNEgressObservation YAML/JSON)")
+	simulateCmd.Flags().BoolVar(&simulateFailBlocked, "fail-on-blocked", false, "Exit with non-zero exit code if any observed domain would be blocked (useful for CI/CD checks)")
+	simulateCmd.Flags().BoolVar(&simulateJSON, "json", false, "Output simulation report in JSON format")
+
+	root.AddCommand(previewCmd, diffCmd, suggestCmd, profileCmd, simulateCmd)
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -401,6 +463,230 @@ func runSuggest(cmd *cobra.Command, args []string) error {
 	fmt.Println("# Nothing was written to the cluster — review, edit, and `kubectl apply -f -` yourself.")
 	fmt.Println("# Starts in Audit mode: switch spec.mode to Enforce once you're satisfied with the rules.")
 	fmt.Print(string(out))
+	return nil
+}
+
+// ── profile ────────────────────────────────────────────────────────────────
+
+func runProfile(cmd *cobra.Command, args []string) error {
+	var obs netv1alpha1.FQDNEgressObservation
+	var sourceDesc string
+
+	if profileFromFile != "" {
+		data, err := os.ReadFile(profileFromFile)
+		if err != nil {
+			return fmt.Errorf("reading observation file %s: %w", profileFromFile, err)
+		}
+		if err := yaml.Unmarshal(data, &obs); err != nil {
+			return fmt.Errorf("parsing observation file %s: %w", profileFromFile, err)
+		}
+		sourceDesc = fmt.Sprintf("file://%s", profileFromFile)
+	} else {
+		k8sClient, err := buildK8sClient()
+		if err != nil {
+			return fmt.Errorf("connecting to cluster: %w", err)
+		}
+
+		obsName := profileFromObs
+		if obsName == "" && len(args) > 0 {
+			obsName = args[0]
+		}
+		ns := namespace
+		if parts := strings.SplitN(obsName, "/", 2); len(parts) == 2 {
+			ns, obsName = parts[0], parts[1]
+		}
+
+		ctx := context.Background()
+		if obsName != "" {
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: obsName, Namespace: ns}, &obs); err != nil {
+				return fmt.Errorf("fetching FQDNEgressObservation %s/%s: %w", ns, obsName, err)
+			}
+		} else {
+			var list netv1alpha1.FQDNEgressObservationList
+			if err := k8sClient.List(ctx, &list, client.InNamespace(ns)); err != nil {
+				return fmt.Errorf("listing FQDNEgressObservations in namespace %s: %w", ns, err)
+			}
+			if len(list.Items) == 0 {
+				return fmt.Errorf("no FQDNEgressObservation found in namespace %q — specify --from-file or create an observation first", ns)
+			}
+			obs = list.Items[0]
+		}
+		sourceDesc = fmt.Sprintf("k8s://%s/%s", obs.Namespace, obs.Name)
+	}
+
+	if len(obs.Status.ObservedDomains) == 0 {
+		return fmt.Errorf("observation source %s has no observed domains recorded yet", sourceDesc)
+	}
+
+	policyName := profileName
+	if policyName == "" {
+		if obs.Name != "" {
+			policyName = obs.Name + "-policy"
+		} else {
+			policyName = "discovered-egress-policy"
+		}
+	}
+
+	targetNamespace := namespace
+	if targetNamespace == "" {
+		if obs.Namespace != "" {
+			targetNamespace = obs.Namespace
+		} else {
+			targetNamespace = "default"
+		}
+	}
+
+	podSelector := make(map[string]string)
+	if profileAppLabel != "" {
+		parts := strings.SplitN(profileAppLabel, "=", 2)
+		if len(parts) == 2 {
+			podSelector[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		} else {
+			podSelector["app"] = strings.TrimSpace(parts[0])
+		}
+	} else if obs.Spec.PodSelector.PodSelector.MatchLabels != nil {
+		podSelector = obs.Spec.PodSelector.PodSelector.MatchLabels
+	}
+
+	mode := netv1alpha1.PolicyMode(profileMode)
+	if mode != netv1alpha1.PolicyModeAudit && mode != netv1alpha1.PolicyModeEnforce {
+		mode = netv1alpha1.PolicyModeAudit
+	}
+
+	opts := profiler.ProfileOptions{
+		PolicyName:        policyName,
+		Namespace:         targetNamespace,
+		PodSelector:       podSelector,
+		WildcardThreshold: profileWildcardThresh,
+		Mode:              mode,
+		SecurityPreset:    profilePreset,
+		ObservedDomains:   obs.Status.ObservedDomains,
+		ObservationSource: sourceDesc,
+	}
+
+	policy, summary, err := profiler.SynthesizePolicy(opts)
+	if err != nil {
+		return fmt.Errorf("synthesizing policy: %w", err)
+	}
+
+	// Print summary to stderr so stdout remains pipeable to kubectl apply
+	fmt.Fprintln(os.Stderr, summary.String())
+
+	out, err := yaml.Marshal(policy)
+	if err != nil {
+		return fmt.Errorf("marshalling synthesized policy: %w", err)
+	}
+
+	if profileOutput != "" {
+		if err := os.WriteFile(profileOutput, out, 0644); err != nil {
+			return fmt.Errorf("writing output file %s: %w", profileOutput, err)
+		}
+		fmt.Fprintf(os.Stderr, "Synthesized policy written to %s\n", profileOutput)
+	} else {
+		fmt.Print(string(out))
+	}
+
+	return nil
+}
+
+// ── simulate ───────────────────────────────────────────────────────────────
+
+func runSimulate(cmd *cobra.Command, args []string) error {
+	target := args[0]
+	var policy netv1alpha1.FQDNNetworkPolicy
+
+	// 1. Load Policy (file or cluster)
+	if _, err := os.Stat(target); err == nil || strings.HasSuffix(target, ".yaml") || strings.HasSuffix(target, ".yml") {
+		data, err := os.ReadFile(target)
+		if err != nil {
+			return fmt.Errorf("reading policy file %s: %w", target, err)
+		}
+		if err := yaml.Unmarshal(data, &policy); err != nil {
+			return fmt.Errorf("parsing policy file %s: %w", target, err)
+		}
+	} else {
+		k8sClient, err := buildK8sClient()
+		if err != nil {
+			return fmt.Errorf("connecting to cluster: %w", err)
+		}
+		ns := namespace
+		name := target
+		if parts := strings.SplitN(target, "/", 2); len(parts) == 2 {
+			ns, name = parts[0], parts[1]
+		}
+		ctx := context.Background()
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &policy); err != nil {
+			return fmt.Errorf("fetching FQDNNetworkPolicy %s/%s: %w", ns, name, err)
+		}
+	}
+
+	// 2. Load Observed Domains Baseline
+	var observed []netv1alpha1.ObservedDomain
+	if simulateBaseline != "" {
+		data, err := os.ReadFile(simulateBaseline)
+		if err != nil {
+			return fmt.Errorf("reading baseline file %s: %w", simulateBaseline, err)
+		}
+		var obs netv1alpha1.FQDNEgressObservation
+		if err := yaml.Unmarshal(data, &obs); err != nil {
+			return fmt.Errorf("parsing baseline file %s: %w", simulateBaseline, err)
+		}
+		observed = obs.Status.ObservedDomains
+	} else {
+		k8sClient, err := buildK8sClient()
+		if err != nil {
+			return fmt.Errorf("connecting to cluster: %w", err)
+		}
+		obsName := simulateFromObs
+		ns := policy.Namespace
+		if ns == "" {
+			ns = namespace
+		}
+		ctx := context.Background()
+		if obsName != "" {
+			var obs netv1alpha1.FQDNEgressObservation
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: obsName, Namespace: ns}, &obs); err != nil {
+				return fmt.Errorf("fetching FQDNEgressObservation %s/%s: %w", ns, obsName, err)
+			}
+			observed = obs.Status.ObservedDomains
+		} else {
+			var list netv1alpha1.FQDNEgressObservationList
+			if err := k8sClient.List(ctx, &list, client.InNamespace(ns)); err != nil {
+				return fmt.Errorf("listing observations in %s: %w", ns, err)
+			}
+			if len(list.Items) == 0 {
+				return fmt.Errorf("no FQDNEgressObservation found in namespace %q to simulate against (specify --baseline or --from-observation)", ns)
+			}
+			observed = list.Items[0].Status.ObservedDomains
+		}
+	}
+
+	if len(observed) == 0 {
+		return fmt.Errorf("baseline has no observed domains recorded — run an observation window first or provide a populated baseline")
+	}
+
+	// 3. Run Simulation
+	report, err := profiler.Simulate(&policy, observed)
+	if err != nil {
+		return fmt.Errorf("running simulation: %w", err)
+	}
+
+	// 4. Render Output
+	if simulateJSON {
+		out, err := report.JSON()
+		if err != nil {
+			return fmt.Errorf("generating JSON report: %w", err)
+		}
+		fmt.Println(string(out))
+	} else {
+		fmt.Print(report.String())
+	}
+
+	// 5. Blast Radius Failure Check
+	if simulateFailBlocked && report.HasRisk {
+		return fmt.Errorf("blast radius check failed: %d observed domain(s) would be blocked under this policy", report.BlockedCount)
+	}
+
 	return nil
 }
 

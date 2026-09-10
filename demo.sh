@@ -230,4 +230,55 @@ section "17. Suggest a policy from the observed drift (nothing is written to the
 make kubectl-plugin >/dev/null
 ./bin/kubectl-fqdn_policy suggest "$NS/allow-stripe-and-github"
 
+section "18. Profile: Brownfield zero-touch discovery & policy synthesis from observed traffic"
+# Demonstrates automated brownfield policy discovery: analyzes observed DNS traffic,
+# filters out cluster-internal Kubernetes service noise (.cluster.local, arpa),
+# clusters subdomains into wildcards, classifies by provider, and generates an Audit-mode policy.
+echo "--- Synthesizing policy from FQDNEgressObservation cluster-egress-observation ---"
+./bin/kubectl-fqdn_policy profile cluster-egress-observation -n "$NS" \
+  --app-label app=checkout-service \
+  --wildcard-threshold 2 \
+  --preset strict \
+  --output /tmp/profiled-policy.yaml
+
+echo -e "\n--- Generated policy manifest (/tmp/profiled-policy.yaml) ---"
+cat /tmp/profiled-policy.yaml
+
+section "19. Simulate: Blast-radius pre-flight impact simulation"
+# Evaluates a proposed policy against real observed DNS queries to prove that no
+# active external dependency is accidentally broken before switching to Enforce mode.
+echo "--- Simulating synthesized policy against cluster traffic baseline ---"
+./bin/kubectl-fqdn_policy simulate /tmp/profiled-policy.yaml \
+  --from-observation cluster-egress-observation -n "$NS"
+
+echo "--- Simulating a deliberately incomplete policy to demonstrate blast-radius risk detection ---"
+cat <<EOF > /tmp/incomplete-policy.yaml
+apiVersion: netsec.kunal.dev/v1alpha1
+kind: FQDNNetworkPolicy
+metadata:
+  name: incomplete-policy
+  namespace: $NS
+spec:
+  podSelector:
+    podSelector:
+      matchLabels:
+        app: checkout-service
+  mode: Enforce
+  egress:
+  - match: api.stripe.com
+  security:
+    blockPrivateIPs: true
+EOF
+
+# This detects that other observed domains are missing from the policy!
+set +e
+./bin/kubectl-fqdn_policy simulate /tmp/incomplete-policy.yaml \
+  --from-observation cluster-egress-observation -n "$NS" \
+  --fail-on-blocked
+SIM_EXIT=$?
+set -e
+if [ "$SIM_EXIT" -ne 0 ]; then
+  echo -e "\n✓ Blast-radius gate correctly detected missing dependencies and blocked risky enforcement (exit code: $SIM_EXIT)!"
+fi
+
 section "Done. Tear down with: kind delete cluster --name $CLUSTER_NAME"

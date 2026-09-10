@@ -41,6 +41,10 @@ type ObservedDomain struct {
 	// is available -- a follow-on feature.
 	// +optional
 	ObservedPorts []int32 `json:"observedPorts,omitempty"`
+
+	// QueryCount is the number of times this hostname was observed queried via DNS.
+	// +optional
+	QueryCount int64 `json:"queryCount,omitempty"`
 }
 
 // FQDNEgressObservationStatus defines the observed state.
