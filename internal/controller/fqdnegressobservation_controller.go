@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	netv1alpha1 "github.com/kunaldevxxx/fqdn-network-policy/api/v1alpha1"
@@ -29,6 +30,9 @@ type FQDNEgressObservationReconciler struct {
 	// Snoop is nil when the snoop resolver isn't enabled. This controller
 	// requires it to be active -- it's the only source of observation data.
 	Snoop *dns.SnoopResolver
+
+	syncedMu     sync.Mutex
+	syncedCounts map[string]map[string]int64
 }
 
 // +kubebuilder:rbac:groups=netsec.kunal.dev,resources=fqdnegressobservations,verbs=get;list;watch;create;update;patch;delete
@@ -57,8 +61,20 @@ func (r *FQDNEgressObservationReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{RequeueAfter: defaultPollInterval}, nil
 	}
 
+	r.syncedMu.Lock()
+	if r.syncedCounts == nil {
+		r.syncedCounts = make(map[string]map[string]int64)
+	}
+	key := req.NamespacedName.String()
+	lastSynced := r.syncedCounts[key]
+	if lastSynced == nil {
+		lastSynced = make(map[string]int64)
+		r.syncedCounts[key] = lastSynced
+	}
+	r.syncedMu.Unlock()
+
 	live := r.Snoop.Observations().AllDomains()
-	obs.Status.ObservedDomains = mergeObservedDomains(obs.Status.ObservedDomains, live)
+	obs.Status.ObservedDomains = mergeObservedDomains(obs.Status.ObservedDomains, live, lastSynced)
 	obs.Status.ObservationComplete = time.Since(obs.CreationTimestamp.Time) >= obs.Spec.ObservationWindow.Duration
 	obs.Status.ObservedGeneration = obs.Generation
 
@@ -76,11 +92,13 @@ func (r *FQDNEgressObservationReconciler) Reconcile(ctx context.Context, req ctr
 }
 
 // mergeObservedDomains additively merges newly observed domains into the
-// existing status: a hostname already known keeps its FirstSeen and only
-// advances LastSeen, and one absent from the (in-memory, restart-losable)
-// live store is never dropped. This is what makes ObservedDomains durable
-// across controller restarts -- status in etcd is the source of truth.
-func mergeObservedDomains(existing []netv1alpha1.ObservedDomain, live map[string]dns.FirstLastSeen) []netv1alpha1.ObservedDomain {
+// existing status: a hostname already known keeps its FirstSeen, advances
+// LastSeen, and additively tracks QueryCount without double counting.
+func mergeObservedDomains(
+	existing []netv1alpha1.ObservedDomain,
+	live map[string]dns.FirstLastSeen,
+	lastSynced map[string]int64,
+) []netv1alpha1.ObservedDomain {
 	byHostname := make(map[string]netv1alpha1.ObservedDomain, len(existing)+len(live))
 	hostnames := make([]string, 0, len(existing)+len(live))
 
@@ -90,12 +108,20 @@ func mergeObservedDomains(existing []netv1alpha1.ObservedDomain, live map[string
 	}
 
 	for hostname, seen := range live {
+		prevCount := lastSynced[hostname]
+		delta := seen.QueryCount - prevCount
+		if delta < 0 {
+			delta = seen.QueryCount
+		}
+		lastSynced[hostname] = seen.QueryCount
+
 		d, ok := byHostname[hostname]
 		if !ok {
 			byHostname[hostname] = netv1alpha1.ObservedDomain{
-				Hostname:  hostname,
-				FirstSeen: metav1.NewTime(seen.FirstSeen),
-				LastSeen:  metav1.NewTime(seen.LastSeen),
+				Hostname:   hostname,
+				FirstSeen:  metav1.NewTime(seen.FirstSeen),
+				LastSeen:   metav1.NewTime(seen.LastSeen),
+				QueryCount: delta,
 			}
 			hostnames = append(hostnames, hostname)
 			continue
@@ -106,6 +132,7 @@ func mergeObservedDomains(existing []netv1alpha1.ObservedDomain, live map[string
 		if seen.LastSeen.After(d.LastSeen.Time) {
 			d.LastSeen = metav1.NewTime(seen.LastSeen)
 		}
+		d.QueryCount += delta
 		byHostname[hostname] = d
 	}
 

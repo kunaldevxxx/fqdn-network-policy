@@ -230,6 +230,47 @@ Reads the named `FQDNNetworkPolicy`'s `status.observedUnpoliciedDomains` (see
 manifest — one rule per drifted hostname, starting in `Audit` mode — for you to review, edit, and
 `kubectl apply -f -` yourself. Nothing is written to the cluster by this command.
 
+### profile — discover and synthesize policies from traffic
+
+Synthesizes a production-ready `FQDNNetworkPolicy` from observed DNS traffic (`FQDNEgressObservation` or an offline observation file). Filters cluster-internal DNS names (`.cluster.local`, `arpa`, `localhost`), clusters high-cardinality subdomains into wildcards (`*.stripe.com`), classifies by provider/category, and applies safe security defaults in `Audit` mode:
+
+```bash
+# Discover from live cluster observation
+kubectl fqdn-policy profile cluster-egress-observation -n payments --app-label app=checkout
+
+# Run offline / air-gapped from an exported observation file
+kubectl fqdn-policy profile --from-file observation.yaml --wildcard-threshold 3 --preset strict
+```
+
+**Flags:**
+- `--from-observation <name>` — Name of the `FQDNEgressObservation` resource in cluster
+- `--from-file <path>` — Offline YAML/JSON observation file (works in air-gapped / CI environments)
+- `--wildcard-threshold <int>` — Subdomains required under the same domain to trigger wildcard rollup (default: `3`, `0` to disable)
+- `--preset <production|strict|relaxed>` — Security preset (default: `production` with `blockPrivateIPs: true`)
+- `--app-label <key=val>` — Set `podSelector.matchLabels` (e.g. `app=checkout`)
+- `--mode <Audit|Enforce>` — Policy mode (default: `Audit`)
+- `-o, --output <file>` — Write policy YAML to file instead of stdout
+
+### simulate — evaluate blast radius before enforcing
+
+Performs pre-flight blast radius simulation of a proposed policy against real observed cluster DNS queries (from an active observation or an offline baseline file). Identifies exactly which domains will be permitted and which domains will be **BLOCKED**, preventing production outages before switching from `Audit` to `Enforce`:
+
+```bash
+# Simulate policy against recorded baseline
+kubectl fqdn-policy simulate policy.yaml --baseline observation.yaml
+
+# CI/CD Gate: Fail build if any active domain would be blocked
+kubectl fqdn-policy simulate payments/checkout-policy --fail-on-blocked
+
+# Machine-readable JSON output for automated GitOps pipelines
+kubectl fqdn-policy simulate policy.yaml --baseline observation.yaml --json
+```
+
+**What the simulation checks:**
+- **Blast Radius Analysis:** Exact list of actively queried hostnames that are missing from the policy and would be blocked.
+- **Coverage Breakdown:** Total domains, permitted domains, dropped domains, and ignored internal Kubernetes services.
+- **Security & Sanity Audits:** Flags empty egress rules, overly broad wildcards (`*`, `*.com`), and disabled private IP blocking.
+
 ---
 
 ## Installation

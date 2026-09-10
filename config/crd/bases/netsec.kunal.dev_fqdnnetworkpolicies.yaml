@@ -338,6 +338,11 @@ spec:
                         format: int32
                         type: integer
                       type: array
+                    queryCount:
+                      description: QueryCount is the number of times this hostname
+                        was observed queried via DNS.
+                      format: int64
+                      type: integer
                   required:
                   - firstSeen
                   - hostname

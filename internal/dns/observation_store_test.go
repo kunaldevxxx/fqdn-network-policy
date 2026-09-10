@@ -33,4 +33,14 @@ func TestObservationStore_FirstSeenPreservedLastSeenAdvances(t *testing.T) {
 
 	assert.Equal(t, first, second.FirstSeen, "FirstSeen must not change on repeat observation")
 	assert.False(t, second.LastSeen.Before(first), "LastSeen should not move backwards")
+	assert.Equal(t, int64(2), second.QueryCount, "QueryCount must increment on repeat observation")
+}
+
+func TestObservationStore_QueryCountIncrements(t *testing.T) {
+	o := dns.NewObservationStore()
+	o.Record("api.stripe.com")
+	o.Record("api.stripe.com")
+	o.Record("api.stripe.com")
+
+	assert.Equal(t, int64(3), o.AllDomains()["api.stripe.com"].QueryCount)
 }

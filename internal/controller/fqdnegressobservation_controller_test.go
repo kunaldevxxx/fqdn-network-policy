@@ -79,15 +79,21 @@ func TestFQDNEgressObservationReconciler_PopulatesObservedDomainsClusterWide(t *
 	require.NoError(t, fakeClient.Get(context.Background(), req.NamespacedName, &updated))
 	require.Len(t, updated.Status.ObservedDomains, 1)
 	assert.Equal(t, "api.stripe.com", updated.Status.ObservedDomains[0].Hostname)
+	assert.Equal(t, int64(1), updated.Status.ObservedDomains[0].QueryCount)
 	assert.Equal(t, metav1.ConditionTrue, conditionStatus(updated.Status.Conditions, "Ready"))
 
-	// Second reconcile with a new hostname observed: status should
-	// accumulate additively rather than replace, per Issue #8's restart
+	// Second reconcile with a new hostname observed and repeat query on existing:
+	// status should accumulate additively rather than replace, per Issue #8's restart
 	// durability requirement.
 	snoop.Observations().Record("api.github.com")
+	snoop.Observations().Record("api.stripe.com")
 	_, err = r.Reconcile(context.Background(), req)
 	require.NoError(t, err)
 
 	require.NoError(t, fakeClient.Get(context.Background(), req.NamespacedName, &updated))
 	require.Len(t, updated.Status.ObservedDomains, 2)
+	assert.Equal(t, "api.github.com", updated.Status.ObservedDomains[0].Hostname)
+	assert.Equal(t, int64(1), updated.Status.ObservedDomains[0].QueryCount)
+	assert.Equal(t, "api.stripe.com", updated.Status.ObservedDomains[1].Hostname)
+	assert.Equal(t, int64(2), updated.Status.ObservedDomains[1].QueryCount)
 }
