@@ -54,11 +54,7 @@ func IsInternalDomain(hostname string) bool {
 
 	// Single-label hostnames without any dot are internal/local (e.g. "coredns", "vault")
 	trimmed := strings.TrimSuffix(hostname, ".")
-	if !strings.Contains(trimmed, ".") {
-		return true
-	}
-
-	return false
+	return !strings.Contains(trimmed, ".")
 }
 
 // FilterDomains partitions observed domains into external candidate domains

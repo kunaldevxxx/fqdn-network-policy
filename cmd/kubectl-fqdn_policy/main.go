@@ -510,7 +510,6 @@ func runProfile(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("no FQDNEgressObservation found in namespace %q — specify --from-file or create an observation first", ns)
 			}
 			obs = list.Items[0]
-			obsName = obs.Name
 		}
 		sourceDesc = fmt.Sprintf("k8s://%s/%s", obs.Namespace, obs.Name)
 	}

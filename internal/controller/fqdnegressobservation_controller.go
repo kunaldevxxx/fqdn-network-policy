@@ -65,7 +65,7 @@ func (r *FQDNEgressObservationReconciler) Reconcile(ctx context.Context, req ctr
 	if r.syncedCounts == nil {
 		r.syncedCounts = make(map[string]map[string]int64)
 	}
-	key := req.NamespacedName.String()
+	key := req.String()
 	lastSynced := r.syncedCounts[key]
 	if lastSynced == nil {
 		lastSynced = make(map[string]int64)

@@ -183,20 +183,20 @@ func (r *SimulationReport) String() string {
 
 	banner := "================================================================================"
 	b.WriteString(banner + "\n")
-	b.WriteString(fmt.Sprintf(" BLAST RADIUS REPORT: %s/%s (Mode: %s)\n", r.Namespace, r.PolicyName, r.Mode))
+	fmt.Fprintf(&b, " BLAST RADIUS REPORT: %s/%s (Mode: %s)\n", r.Namespace, r.PolicyName, r.Mode)
 	b.WriteString(banner + "\n\n")
 
 	if r.HasRisk {
-		b.WriteString(fmt.Sprintf("⚠️  RISK DETECTED: %d actively observed domain(s) would be BLOCKED!\n\n", r.BlockedCount))
+		fmt.Fprintf(&b, "⚠️  RISK DETECTED: %d actively observed domain(s) would be BLOCKED!\n\n", r.BlockedCount)
 	} else {
 		b.WriteString("✓ SAFE: All observed external domains are permitted by the proposed policy.\n\n")
 	}
 
-	b.WriteString(fmt.Sprintf("Coverage Breakdown:\n"))
-	b.WriteString(fmt.Sprintf("  Total Domains Observed:  %d\n", r.TotalObserved))
-	b.WriteString(fmt.Sprintf("  Allowed by Policy:       %d\n", r.AllowedCount))
-	b.WriteString(fmt.Sprintf("  BLOCKED (Blast Radius):  %d\n", r.BlockedCount))
-	b.WriteString(fmt.Sprintf("  Internal K8s (Ignored):  %d\n\n", r.InternalCount))
+	b.WriteString("Coverage Breakdown:\n")
+	fmt.Fprintf(&b, "  Total Domains Observed:  %d\n", r.TotalObserved)
+	fmt.Fprintf(&b, "  Allowed by Policy:       %d\n", r.AllowedCount)
+	fmt.Fprintf(&b, "  BLOCKED (Blast Radius):  %d\n", r.BlockedCount)
+	fmt.Fprintf(&b, "  Internal K8s (Ignored):  %d\n\n", r.InternalCount)
 
 	if len(r.BlockedDomains) > 0 {
 		b.WriteString("--------------------------------------------------------------------------------\n")
@@ -207,7 +207,7 @@ func (r *SimulationReport) String() string {
 			if d.QueryCount > 0 {
 				queries = fmt.Sprintf(" (queries: %d)", d.QueryCount)
 			}
-			b.WriteString(fmt.Sprintf("  ✗ %-32s [%s / %s]%s\n", d.Hostname, d.Category, d.Provider, queries))
+			fmt.Fprintf(&b, "  ✗ %-32s [%s / %s]%s\n", d.Hostname, d.Category, d.Provider, queries)
 		}
 		b.WriteString("\n")
 	}
@@ -223,10 +223,10 @@ func (r *SimulationReport) String() string {
 		}
 		for i := 0; i < limit; i++ {
 			d := r.AllowedDomains[i]
-			b.WriteString(fmt.Sprintf("  ✓ %-32s (matched by: %s)\n", d.Hostname, d.MatchedBy))
+			fmt.Fprintf(&b, "  ✓ %-32s (matched by: %s)\n", d.Hostname, d.MatchedBy)
 		}
 		if len(r.AllowedDomains) > 10 {
-			b.WriteString(fmt.Sprintf("  ... and %d more allowed domains\n", len(r.AllowedDomains)-10))
+			fmt.Fprintf(&b, "  ... and %d more allowed domains\n", len(r.AllowedDomains)-10)
 		}
 		b.WriteString("\n")
 	}
@@ -237,12 +237,13 @@ func (r *SimulationReport) String() string {
 		b.WriteString("--------------------------------------------------------------------------------\n")
 		for _, audit := range r.SecurityAudits {
 			symbol := "ℹ"
-			if audit.Level == "WARNING" {
+			switch audit.Level {
+			case "WARNING":
 				symbol = "!"
-			} else if audit.Level == "CRITICAL" {
+			case "CRITICAL":
 				symbol = "✗"
 			}
-			b.WriteString(fmt.Sprintf("  [%s] %s %s\n", audit.Level, symbol, audit.Message))
+			fmt.Fprintf(&b, "  [%s] %s %s\n", audit.Level, symbol, audit.Message)
 		}
 		b.WriteString("\n")
 	}
